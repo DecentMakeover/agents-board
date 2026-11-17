@@ -29,10 +29,11 @@ Keys on the full-screen board:
 
 | Key | Does |
 | --- | --- |
-| `↑` `↓` / `j` `k` | move between sessions; the right panel shows the full question, suggested reply and original ask |
-| `⏎` / click | open that session on the right and type into it (see below) |
-| `space` | peek: open it on the right but stay on the board |
-| `x` | close the side pane (the session keeps running) |
+| `↑` `↓` / `j` `k` | move between sessions |
+| `⏎` / click | open that session in a column beside the board and type into it (see below) |
+| `space` | peek: open it in a column but stay on the board |
+| `x` | close the session columns (the sessions keep running) |
+| `i` | show the info panel: full question, suggested reply, original ask (remembered) |
 | `g` | group by folder instead of by status (remembered) |
 | `c` | start a new session in the selected session's folder (see below) |
 | `/` | filter by name, folder or question; `esc` clears |
@@ -43,12 +44,13 @@ Keys on the full-screen board:
 | `n` | alerts on/off |
 | `r` / `q` | refresh now / quit |
 
-**Side pane.** When the board runs in cmux, `⏎` splits the board's tab and attaches the selected
-background session on the right (`claude attach <id>`), ready for your reply. Pick another session
-and it replaces the first in that same pane, so you work through a queue without leaving the board.
-`space` does the same without moving the cursor off the board, and `x` closes the pane. Closing or
-replacing it only detaches: the session keeps running. A session marked *asleep* (its process has
-exited) resumes when attached.
+**Session columns.** When the board runs in cmux, `⏎` opens the selected background session in a
+column beside the board (`claude attach <id>`), ready for your reply. A second session opens a second
+column: board | session | session, the board at about a third. A third session replaces whichever
+column you used least recently, so the two you are working with stay up; a session already open is
+just focused. `space` does the same without leaving the board, `x` closes the columns. Closing or
+replacing a column only detaches: the session keeps running. A session marked *asleep* (its process
+has exited) resumes when attached.
 
 Interactive sessions (the ones marked `tab`) can't be attached in a second place, so `⏎` switches
 to their own cmux tab instead. Without cmux, the board tells you the `claude attach <id>` to run.

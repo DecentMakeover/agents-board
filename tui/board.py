@@ -452,41 +452,56 @@ def _save_prefs(prefs: dict[str, Any]) -> None:
         pass
 
 
-class SideViewer:
-    """A split on the board's right that shows one background session at a time.
+SLOTS = 2              # session columns to the right of the board
+BOARD_SHARE = 0.32     # of the workspace width, once the slots are open
 
-    Opening a session attaches it there (`claude attach <id>`); opening another
-    puts it in a new tab of that same pane and closes the old one, so the pane
-    keeps its place and size. Closing an attached tab leaves the session running.
-    Only works when the board itself runs inside cmux (it splits its own tab).
+
+class SideViewer:
+    """Up to two session columns to the right of the board: board | slot | slot.
+
+    Opening a session attaches it (`claude attach <id>`) in a slot. While there is
+    room a new column is split off; after that the least recently used slot gets
+    the session (a new tab in that pane, the old one closed), so the two sessions
+    you are working with stay up. A session already showing is just focused.
+    Closing an attached tab only detaches: the session keeps running. Only works
+    when the board itself runs inside cmux (it splits its own tab).
     """
 
     def __init__(self) -> None:
         self.workspace = os.environ.get("CMUX_WORKSPACE_ID", "")
         self.board_surface = os.environ.get("CMUX_SURFACE_ID", "")
-        self.pane = ""
-        self.surface = ""
-        self.key = ""
+        # Each slot: {"pane", "surface", "key", "used"}; left to right.
+        self.slots: list[dict[str, Any]] = []
         self._restore()
 
-    # The board restarts itself on update: keep the side pane it opened.
+    # The board restarts itself on update: keep the slots it opened.
     def _file(self) -> Path:
         return STATE / f"side-{self.workspace or 'none'}.json"
 
     def _restore(self) -> None:
         saved = _read_json(self._file())
-        self.pane, self.surface, self.key = (_s(saved.get(k)) for k in ("pane", "surface", "key"))
+        slots = saved.get("slots")
+        if isinstance(slots, list):
+            self.slots = [x for x in slots if isinstance(x, dict)]
+        elif saved.get("pane") or saved.get("surface"):  # one-slot layout of earlier versions
+            self.slots = [{"pane": _s(saved.get("pane")), "surface": _s(saved.get("surface")),
+                           "key": _s(saved.get("key")), "used": 0}]
 
     def _save(self) -> None:
         try:
             STATE.mkdir(parents=True, exist_ok=True)
-            self._file().write_text(json.dumps({"pane": self.pane, "surface": self.surface, "key": self.key}))
+            self._file().write_text(json.dumps({"slots": self.slots}))
         except OSError:
             pass
 
     @property
     def available(self) -> bool:
         return bool(self.workspace and self.board_surface and Path(CMUX).exists()) and not DEMO
+
+    @property
+    def key(self) -> str:
+        """The most recently used slot's session (kept for callers of the one-slot API)."""
+        return max(self.slots, key=lambda x: x.get("used", 0)).get("key", "") if self.slots else ""
 
     def _panes(self) -> list[dict[str, Any]]:
         out = _cmux("--json", "list-panes", "--workspace", self.workspace)
@@ -507,61 +522,111 @@ class SideViewer:
                 time.sleep(0.25)
         return ""
 
-    def _still_there(self) -> bool:
-        """Is our pane still open, holding our surface? (The person may have closed it.)"""
-        if not self.pane and self.surface:
-            self.pane = self._pane_of(self.surface)
-        if not self.pane:
-            return False
-        for p in self._panes():
-            if self.pane in (p.get("ref"), p.get("id")):
-                refs = set(p.get("surface_refs") or []) | set(p.get("surface_ids") or [])
-                if self.surface not in refs:
-                    self.surface = ""
-                return True
-        self.pane = self.surface = self.key = ""
-        return False
+    def _prune(self) -> None:
+        """Forget slots whose pane the person closed; refind a pane from its surface."""
+        panes = self._panes()
+        by_ref = {_s(p.get("ref")): p for p in panes} | {_s(p.get("id")): p for p in panes}
+        kept = []
+        for slot in self.slots:
+            pane = by_ref.get(slot.get("pane", ""))
+            if pane is None and slot.get("surface"):
+                ref = next((_s(p.get("ref")) for p in panes
+                            if slot["surface"] in (p.get("surface_refs") or []) + (p.get("surface_ids") or [])), "")
+                pane = by_ref.get(ref)
+                slot["pane"] = ref
+            if pane is None:
+                continue
+            refs = set(pane.get("surface_refs") or []) | set(pane.get("surface_ids") or [])
+            if slot.get("surface") not in refs:
+                slot["surface"] = next(iter(pane.get("surface_refs") or []), "")
+            kept.append(slot)
+        # Left to right, as on screen.
+        x = {_s(p.get("ref")): (p.get("pixel_frame") or {}).get("x", 0) for p in panes}
+        self.slots = sorted(kept, key=lambda sl: x.get(sl["pane"], 0))
+
+    def _layout(self) -> None:
+        """Board about a third, the slots sharing the rest evenly (cmux halves on each split)."""
+        panes = sorted(self._panes(), key=lambda p: (p.get("pixel_frame") or {}).get("x", 0))
+        if len(panes) < 2:
+            return
+        total = sum((p.get("pixel_frame") or {}).get("width", 0) for p in panes)
+        board_w = round(total * BOARD_SHARE) if len(panes) > 2 else round(total * 0.42)
+        slot_w = (total - board_w) // (len(panes) - 1)
+        # Move each slot's left border so the pane before it has its target width.
+        for i in range(1, len(panes)):
+            panes = sorted(self._panes(), key=lambda p: (p.get("pixel_frame") or {}).get("x", 0))
+            if i >= len(panes):
+                return
+            want = board_w if i == 1 else slot_w
+            have = (panes[i - 1].get("pixel_frame") or {}).get("width", 0)
+            delta = have - want
+            if abs(delta) > 8:
+                _cmux("resize-pane", "--workspace", self.workspace, "--pane", _s(panes[i].get("ref")),
+                      "-L" if delta > 0 else "-R", "--amount", str(abs(delta)))
 
     def show(self, row: Row, focus: bool) -> str:
         return self.show_command(f"claude attach {row.id}", row.key, row.name, focus)
 
     def show_command(self, command: str, key: str, label: str, focus: bool) -> str:
-        if self.key == key and self._still_there() and self.surface:
+        self._prune()
+        now = time.time()
+        hit = next((sl for sl in self.slots if sl.get("key") == key and sl.get("surface")), None)
+        if hit is not None:
+            hit["used"] = now
             if focus:
-                _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
-            return f"{label} is already on the right"
-        if self._still_there():
-            made = _cmux("new-surface", "--pane", self.pane, "--workspace", self.workspace,
-                         "--command", command, "--focus", "true" if focus else "false")
+                _cmux("focus-panel", "--panel", hit["surface"], "--workspace", self.workspace)
+            self._save()
+            return f"{label} is already open"
+        flag = "true" if focus else "false"
+        if len(self.slots) < SLOTS:
+            # Room for another column: split off the rightmost pane.
+            parent = self.slots[-1]["surface"] if self.slots else self.board_surface
+            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", parent,
+                         "--command", command, "--focus", flag)
             if made.returncode != 0:
                 return f"cmux: {made.stderr.strip()[:120]}"
-            old, self.surface = self.surface, made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
+            surface = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
+            slot = {"pane": self._pane_of(surface, tries=8), "surface": surface, "key": key, "used": now}
+            self.slots.append(slot)
+            self._layout()
+        else:
+            # Both columns busy: the least recently used one gets this session.
+            slot = min(self.slots, key=lambda sl: sl.get("used", 0))
+            made = _cmux("new-surface", "--pane", slot["pane"], "--workspace", self.workspace,
+                         "--command", command, "--focus", flag)
+            if made.returncode != 0:
+                return f"cmux: {made.stderr.strip()[:120]}"
+            old = slot.get("surface", "")
+            slot.update(surface=made.stdout.split()[1] if len(made.stdout.split()) > 1 else "", key=key, used=now)
             if old:
                 _cmux("close-surface", "--surface", old, "--workspace", self.workspace, "--force")
-        else:
-            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", self.board_surface,
-                         "--command", command, "--focus", "true" if focus else "false")
-            if made.returncode != 0:
-                return f"cmux: {made.stderr.strip()[:120]}"
-            self.surface = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
-            self.pane = self._pane_of(self.surface, tries=8)
-        if focus and self.surface:
-            # Some cmux builds take focus on new-surface only within the pane; make it explicit.
-            _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
-        self.key = key
+        if focus and slot.get("surface"):
+            _cmux("focus-panel", "--panel", slot["surface"], "--workspace", self.workspace)
         self._save()
-        return f"{label} opened on the right"
+        return f"{label} opened in column {self.slots.index(slot) + 1} of {len(self.slots)}"
+
+    def drop(self, key: str) -> None:
+        """Close the slot showing `key` (its session was archived)."""
+        self._prune()
+        for slot in [sl for sl in self.slots if sl.get("key") == key]:
+            if slot.get("surface"):
+                _cmux("close-surface", "--surface", slot["surface"], "--workspace", self.workspace, "--force")
+            self.slots.remove(slot)
+        self._save()
 
     def close(self) -> str:
-        if not self._still_there():
-            return "No side pane open"
-        for p in self._panes():
-            if self.pane in (p.get("ref"), p.get("id")):
-                for ref in p.get("surface_refs") or []:
-                    _cmux("close-surface", "--surface", ref, "--workspace", self.workspace, "--force")
-        self.pane = self.surface = self.key = ""
+        self._prune()
+        if not self.slots:
+            return "No session columns open"
+        for slot in self.slots:
+            for p in self._panes():
+                if slot["pane"] in (p.get("ref"), p.get("id")):
+                    for ref in p.get("surface_refs") or []:
+                        _cmux("close-surface", "--surface", ref, "--workspace", self.workspace, "--force")
+        n = len(self.slots)
+        self.slots = []
         self._save()
-        return "Side pane closed (the session keeps running)"
+        return f"Closed {n} session column{'s' if n > 1 else ''} (the sessions keep running)"
 
 
 # ── app ────────────────────────────────────────────────────────────────────
@@ -595,9 +660,10 @@ class Board(App[None]):
     BINDINGS = [
         Binding("enter", "jump", "open", priority=False),
         Binding("space", "peek", "peek"),
-        Binding("x", "close_side", "close side"),
+        Binding("x", "close_side", "close sessions"),
         Binding("c", "new_session", "new here"),
         Binding("g", "toggle_grouping", "by folder/status"),
+        Binding("i", "toggle_info", "info"),
         Binding("slash", "filter", "filter"),
         Binding("a", "archive", "archive"),
         Binding("h", "hide", "hide"),
@@ -626,6 +692,7 @@ class Board(App[None]):
         self.side = SideViewer()
         self.restart = False
         self.by_folder = bool(_prefs().get("by_folder"))
+        self.show_info = bool(_prefs().get("show_info"))
         self.new_cwd = ""
 
     # layout
@@ -671,8 +738,19 @@ class Board(App[None]):
             self.exit()
 
     def on_resize(self) -> None:
-        self.query_one("#side").set_class(self.size.width < 110, "hidden")
+        # The detail panel is off by default (the session columns sit beside the board);
+        # `i` brings it back where there is room.
+        self.query_one("#side").set_class(not self.show_info or self.size.width < 110, "hidden")
         self.render_list()
+
+    def action_toggle_info(self) -> None:
+        self.show_info = not self.show_info
+        prefs = _prefs()
+        prefs["show_info"] = self.show_info
+        _save_prefs(prefs)
+        if self.show_info and self.size.width < 110:
+            self.notify("Not enough room for the info panel here: widen the board", timeout=3)
+        self.on_resize()
 
     # data
     @work(thread=True, exclusive=True, group="load")
@@ -1001,8 +1079,7 @@ class Board(App[None]):
     def run_archive(self, r: Row) -> None:
         ok, msg = archive_session(r)
         if ok:
-            if self.side.key == r.key:
-                self.side.close()
+            self.side.drop(r.key)
 
             def drop() -> None:
                 self.rows = [x for x in self.rows if x.key != r.key]
