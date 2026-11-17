@@ -30,7 +30,9 @@ Keys on the full-screen board:
 | Key | Does |
 | --- | --- |
 | `↑` `↓` / `j` `k` | move between sessions; the right panel shows the full question, suggested reply and original ask |
-| `⏎` | jump to that session (see below) |
+| `⏎` / click | open that session on the right and type into it (see below) |
+| `space` | peek: open it on the right but stay on the board |
+| `x` | close the side pane (the session keeps running) |
 | `/` | filter by name, folder or question; `esc` clears |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
@@ -38,10 +40,15 @@ Keys on the full-screen board:
 | `n` | alerts on/off |
 | `r` / `q` | refresh now / quit |
 
-**Jumping.** With cmux, `⏎` switches to the tab the session runs in: an interactive session's own
-tab, or the tab a background session is attached in. A background session with no tab opens in a
-new cmux tab running `claude attach <id>`. A session marked *asleep* (its process has exited)
-resumes when attached. Without cmux, the board tells you the `claude attach <id>` to run.
+**Side pane.** When the board runs in cmux, `⏎` splits the board's tab and attaches the selected
+background session on the right (`claude attach <id>`), ready for your reply. Pick another session
+and it replaces the first in that same pane, so you work through a queue without leaving the board.
+`space` does the same without moving the cursor off the board, and `x` closes the pane. Closing or
+replacing it only detaches: the session keeps running. A session marked *asleep* (its process has
+exited) resumes when attached.
+
+Interactive sessions (the ones marked `tab`) can't be attached in a second place, so `⏎` switches
+to their own cmux tab instead. Without cmux, the board tells you the `claude attach <id>` to run.
 
 **Alerts.** When a session newly needs you or looks stuck, the board shows a toast, rings the
 terminal bell and, in cmux, sends a cmux notification.

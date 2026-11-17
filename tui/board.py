@@ -364,6 +364,90 @@ def cmux_notify(title: str, body: str) -> None:
             pass
 
 
+class SideViewer:
+    """A split on the board's right that shows one background session at a time.
+
+    Opening a session attaches it there (`claude attach <id>`); opening another
+    puts it in a new tab of that same pane and closes the old one, so the pane
+    keeps its place and size. Closing an attached tab leaves the session running.
+    Only works when the board itself runs inside cmux (it splits its own tab).
+    """
+
+    def __init__(self) -> None:
+        self.workspace = os.environ.get("CMUX_WORKSPACE_ID", "")
+        self.board_surface = os.environ.get("CMUX_SURFACE_ID", "")
+        self.pane = ""
+        self.surface = ""
+        self.key = ""
+
+    @property
+    def available(self) -> bool:
+        return bool(self.workspace and self.board_surface and Path(CMUX).exists()) and not DEMO
+
+    def _panes(self) -> list[dict[str, Any]]:
+        out = _cmux("--json", "list-panes", "--workspace", self.workspace)
+        if out.returncode != 0:
+            return []
+        try:
+            return list(json.loads(out.stdout).get("panes") or [])
+        except Exception:
+            return []
+
+    def _still_there(self) -> bool:
+        """Is our pane still open, holding our surface? (The person may have closed it.)"""
+        if not self.pane:
+            return False
+        for p in self._panes():
+            if self.pane in (p.get("ref"), p.get("id")):
+                refs = set(p.get("surface_refs") or []) | set(p.get("surface_ids") or [])
+                if self.surface not in refs:
+                    self.surface = ""
+                return True
+        self.pane = self.surface = self.key = ""
+        return False
+
+    def show(self, row: Row, focus: bool) -> str:
+        command = f"claude attach {row.id}"
+        if self.key == row.key and self._still_there() and self.surface:
+            if focus:
+                _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
+            return f"{row.name} is already on the right"
+        if self._still_there():
+            made = _cmux("new-surface", "--pane", self.pane, "--workspace", self.workspace,
+                         "--command", command, "--focus", "true" if focus else "false")
+            if made.returncode != 0:
+                return f"cmux: {made.stderr.strip()[:120]}"
+            old, self.surface = self.surface, made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
+            if old:
+                _cmux("close-surface", "--surface", old, "--workspace", self.workspace, "--force")
+        else:
+            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", self.board_surface,
+                         "--command", command, "--focus", "true" if focus else "false")
+            if made.returncode != 0:
+                return f"cmux: {made.stderr.strip()[:120]}"
+            self.surface = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
+            self.pane = next(
+                (p.get("ref", "") for p in self._panes()
+                 if self.surface in (p.get("surface_refs") or []) or self.surface in (p.get("surface_ids") or [])),
+                "",
+            )
+        if focus and self.surface:
+            # Some cmux builds take focus on new-surface only within the pane; make it explicit.
+            _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
+        self.key = row.key
+        return f"{row.name} opened on the right"
+
+    def close(self) -> str:
+        if not self._still_there():
+            return "No side pane open"
+        for p in self._panes():
+            if self.pane in (p.get("ref"), p.get("id")):
+                for ref in p.get("surface_refs") or []:
+                    _cmux("close-surface", "--surface", ref, "--workspace", self.workspace, "--force")
+        self.pane = self.surface = self.key = ""
+        return "Side pane closed (the session keeps running)"
+
+
 # ── app ────────────────────────────────────────────────────────────────────
 class Board(App[None]):
     TITLE = "agents"
@@ -391,7 +475,9 @@ class Board(App[None]):
     """
 
     BINDINGS = [
-        Binding("enter", "jump", "jump to it", priority=False),
+        Binding("enter", "jump", "open", priority=False),
+        Binding("space", "peek", "peek"),
+        Binding("x", "close_side", "close side"),
         Binding("slash", "filter", "filter"),
         Binding("h", "hide", "hide"),
         Binding("u", "unhide", "unhide all", show=False),
@@ -416,6 +502,7 @@ class Board(App[None]):
         self.primed = False
         self.query_text = ""
         self.shown: list[Row] = []
+        self.side = SideViewer()
 
     # layout
     def compose(self) -> ComposeResult:
@@ -648,9 +735,14 @@ class Board(App[None]):
 
         parts.append(Text(""))
         hint = Text("⏎ ", style=f"bold {ACCENT}")
-        hint.append("jump to it in cmux" if Path(CMUX).exists() else f"claude attach {r.id}", style=DIM)
+        if self.opens_on_side(r):
+            hint.append("open on the right", style=DIM)
+            hint.append("   space ", style=f"bold {ACCENT}")
+            hint.append("peek", style=DIM)
+        else:
+            hint.append("jump to its tab" if Path(CMUX).exists() else f"claude attach {r.id}", style=DIM)
         hint.append("   h ", style=f"bold {ACCENT}")
-        hint.append("hide until it changes", style=DIM)
+        hint.append("hide", style=DIM)
         parts.append(hint)
         box.update(RGroup(*parts))
 
@@ -676,12 +768,30 @@ class Board(App[None]):
     def action_jump(self) -> None:
         r = self.current()
         if r is not None:
-            self.run_jump(r)
+            self.run_jump(r, True)
 
-    @work(thread=True, group="jump")
-    def run_jump(self, r: Row) -> None:
-        msg = jump(r)
-        self.call_from_thread(self.notify, msg, timeout=4)
+    def action_peek(self) -> None:
+        r = self.current()
+        if r is not None:
+            self.run_jump(r, False)
+
+    def action_close_side(self) -> None:
+        self.run_close_side()
+
+    def opens_on_side(self, r: Row) -> bool:
+        return self.side.available and r.kind == "bg" and bool(r.id)
+
+    @work(thread=True, exclusive=True, group="jump")
+    def run_jump(self, r: Row, focus: bool) -> None:
+        # Background sessions open in the split on the right; an interactive tab
+        # can't be attached elsewhere, so that one still switches to its own tab.
+        msg = self.side.show(r, focus) if self.opens_on_side(r) else jump(r)
+        self.call_from_thread(self.notify, msg, timeout=3)
+
+    @work(thread=True, exclusive=True, group="jump")
+    def run_close_side(self) -> None:
+        msg = self.side.close()
+        self.call_from_thread(self.notify, msg, timeout=3)
 
     def action_hide(self) -> None:
         r = self.current()
