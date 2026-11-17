@@ -33,6 +33,8 @@ Keys on the full-screen board:
 | `⏎` / click | open that session on the right and type into it (see below) |
 | `space` | peek: open it on the right but stay on the board |
 | `x` | close the side pane (the session keeps running) |
+| `g` | group by folder instead of by status (remembered) |
+| `c` | start a new session in the selected session's folder (see below) |
 | `/` | filter by name, folder or question; `esc` clears |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
@@ -49,6 +51,16 @@ exited) resumes when attached.
 
 Interactive sessions (the ones marked `tab`) can't be attached in a second place, so `⏎` switches
 to their own cmux tab instead. Without cmux, the board tells you the `claude attach <id>` to run.
+
+**By folder.** `g` regroups the board by folder: each folder gets a header with its counts
+(● needs you, ◆ working, ◇ idle, ✓ done), folders that need you come first, and the sessions inside
+stay sorted by urgency. `g` again goes back to grouping by status.
+
+**New session here.** `c` asks what the new session should do and starts it with
+`claude --bg "<task>"` in the folder of the selected session. It shows up on the board like any
+other session, and in cmux it opens on the right so you can watch it start. Leave the task empty
+and press `⏎` to open an interactive `claude` in that folder on the right instead. A folder Claude
+Code doesn't trust yet answers with its trust message: run `claude` there once and accept.
 
 **Alerts.** When a session newly needs you or looks stuck, the board shows a toast, rings the
 terminal bell and, in cmux, sends a cmux notification.

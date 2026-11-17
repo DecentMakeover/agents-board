@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
@@ -366,6 +368,31 @@ def cmux_notify(title: str, body: str) -> None:
             pass
 
 
+def start_background(cwd: str, task: str) -> tuple[str, str]:
+    """`claude --bg "<task>"` in `cwd`. Answers (job id, message); the id is empty on failure."""
+    try:
+        out = subprocess.run(["claude", "--bg", task], cwd=cwd, capture_output=True, text=True, timeout=60)
+    except Exception as err:
+        return "", f"could not start claude: {err}"
+    m = re.search(r"claude attach ([0-9a-f]{6,})", out.stdout)
+    if out.returncode != 0 or not m:
+        why = (out.stderr or out.stdout).strip().splitlines()
+        return "", why[-1][:160] if why else f"claude exited {out.returncode}"
+    return m.group(1), f"Started a session in {short_folder(cwd)}"
+
+
+def _prefs() -> dict[str, Any]:
+    return _read_json(STATE / "prefs.json")
+
+
+def _save_prefs(prefs: dict[str, Any]) -> None:
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        (STATE / "prefs.json").write_text(json.dumps(prefs))
+    except OSError:
+        pass
+
+
 class SideViewer:
     """A split on the board's right that shows one background session at a time.
 
@@ -425,11 +452,13 @@ class SideViewer:
         return False
 
     def show(self, row: Row, focus: bool) -> str:
-        command = f"claude attach {row.id}"
-        if self.key == row.key and self._still_there() and self.surface:
+        return self.show_command(f"claude attach {row.id}", row.key, row.name, focus)
+
+    def show_command(self, command: str, key: str, label: str, focus: bool) -> str:
+        if self.key == key and self._still_there() and self.surface:
             if focus:
                 _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
-            return f"{row.name} is already on the right"
+            return f"{label} is already on the right"
         if self._still_there():
             made = _cmux("new-surface", "--pane", self.pane, "--workspace", self.workspace,
                          "--command", command, "--focus", "true" if focus else "false")
@@ -452,9 +481,9 @@ class SideViewer:
         if focus and self.surface:
             # Some cmux builds take focus on new-surface only within the pane; make it explicit.
             _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
-        self.key = row.key
+        self.key = key
         self._save()
-        return f"{row.name} opened on the right"
+        return f"{label} opened on the right"
 
     def close(self) -> str:
         if not self._still_there():
@@ -476,6 +505,8 @@ class Board(App[None]):
     #top {{ height: 3; padding: 1 2 0 2; background: {BG}; }}
     #filter {{ dock: top; display: none; margin: 0 2; border: tall {LINE}; background: {PANEL}; }}
     #filter.on {{ display: block; }}
+    #newtask {{ dock: top; display: none; margin: 0 2; border: tall {ACCENT}; background: {PANEL}; }}
+    #newtask.on {{ display: block; }}
     #body {{ height: 1fr; }}
     #list {{
         width: 3fr; background: {BG}; border: none; padding: 0 1 0 2;
@@ -498,6 +529,8 @@ class Board(App[None]):
         Binding("enter", "jump", "open", priority=False),
         Binding("space", "peek", "peek"),
         Binding("x", "close_side", "close side"),
+        Binding("c", "new_session", "new here"),
+        Binding("g", "toggle_grouping", "by folder/status"),
         Binding("slash", "filter", "filter"),
         Binding("h", "hide", "hide"),
         Binding("u", "unhide", "unhide all", show=False),
@@ -507,7 +540,7 @@ class Board(App[None]):
         Binding("r", "reload", "refresh"),
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
-        Binding("escape", "clear_filter", show=False),
+        Binding("escape", "cancel_input", show=False),
         Binding("q", "quit", "quit"),
     ]
 
@@ -524,11 +557,14 @@ class Board(App[None]):
         self.shown: list[Row] = []
         self.side = SideViewer()
         self.restart = False
+        self.by_folder = bool(_prefs().get("by_folder"))
+        self.new_cwd = ""
 
     # layout
     def compose(self) -> ComposeResult:
         yield Static(id="top")
         yield Input(placeholder="filter by name, folder or question…  (esc clears)", id="filter")
+        yield Input(id="newtask")
         with Horizontal(id="body"):
             yield OptionList(id="list")
             with VerticalScroll(id="side"):
@@ -557,7 +593,10 @@ class Board(App[None]):
                 pass
         try:
             changed = SELF.stat().st_mtime != SELF_MTIME
-        except OSError:
+            # Restart only into a file that compiles: a half-saved edit keeps the running board.
+            if changed:
+                compile(SELF.read_text(), str(SELF), "exec")
+        except (OSError, SyntaxError, ValueError):
             return
         if changed:
             self.restart = True
@@ -619,6 +658,9 @@ class Board(App[None]):
 
     # drawing
     def row_prompt(self, r: Row, now: float) -> Table:
+        return self._row_prompt(r, now, show_folder=not self.by_folder)
+
+    def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
         g = GROUPS[r.group]
         ms = now - r.since
         glyph = g["glyph"] if r.pid or r.group in ("done", "parked") else ("○" if r.group == "needs" else "△" if r.group == "stuck" else g["glyph"])
@@ -628,7 +670,8 @@ class Board(App[None]):
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         grid.add_column(width=9, justify="right", no_wrap=True)
         name = Text(r.name, style=f"bold {TEXT}" if r.group in ("needs", "stuck", "working") else SOFT)
-        name.append(f"  {short_folder(r.cwd)}", style=FAINT)
+        if show_folder:
+            name.append(f"  {short_folder(r.cwd)}", style=FAINT)
         if r.kind == "tab":
             name.append("  tab", style=f"{ACCENT}")
         if not r.pid and r.group in ("needs", "stuck"):
@@ -650,6 +693,43 @@ class Board(App[None]):
         grid.add_row(label, Rule(style=LINE))
         return grid
 
+    def folder_header_prompt(self, cwd: str, members: list[Row]) -> Table:
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(no_wrap=True)
+        grid.add_column(ratio=1)
+        label = Text(short_folder(cwd) or "?", style=f"bold {TEXT}")
+        for g in ORDER:
+            n = sum(1 for r in members if r.group == g)
+            if n:
+                label.append(f"   {GROUPS[g]['glyph']} {n}", style=f"bold {GROUPS[g]['color']}")
+        grid.add_row(label, Rule(style=LINE))
+        return grid
+
+    def folder_options(self, rows: list[Row], now: float) -> list[Option]:
+        """Sessions grouped by folder: folders that need you first, then the most recently active."""
+        rows = [r for r in rows if r.group != "parked" or self.show_parked]
+        folders: dict[str, list[Row]] = {}
+        for r in rows:
+            folders.setdefault(r.cwd, []).append(r)
+
+        def urgency_key(item: tuple[str, list[Row]]) -> tuple:
+            members = item[1]
+            live = [r.since for r in members if r.group in ("needs", "stuck", "working", "idle")]
+            return (min(ORDER.index(r.group) for r in members), -(max(live) if live else max(r.since for r in members)))
+
+        options: list[Option] = []
+        for cwd, members in sorted(folders.items(), key=urgency_key):
+            options.append(Option(Padding(self.folder_header_prompt(cwd, members), (1, 0, 0, 0)), id=f"hdr:{cwd}", disabled=True))
+            done = [r for r in members if r.group in ("done", "parked")]
+            active = [r for r in members if r.group not in ("done", "parked")]
+            limit = len(done) if self.show_done else 3
+            for r in active + done[:limit]:
+                options.append(Option(self.row_prompt(r, now), id=f"row:{r.key}"))
+                self.shown.append(r)
+            if len(done) > limit:
+                options.append(Option(Text(f"   + {len(done) - limit} more done  ·  d shows all", style=FAINT), id=f"more:{cwd}", disabled=True))
+        return options
+
     def render_list(self) -> None:
         ol = self.query_one("#list", OptionList)
         now = time.time() * 1000
@@ -657,7 +737,9 @@ class Board(App[None]):
         keep = ol.highlighted_option.id if ol.highlighted_option is not None else None
         options: list[Option] = []
         self.shown = []
-        groups = [g for g in ORDER if g != "parked" or self.show_parked]
+        if self.by_folder:
+            options = self.folder_options(rows, now)
+        groups = [] if self.by_folder else [g for g in ORDER if g != "parked" or self.show_parked]
         for g in groups:
             members = [r for r in rows if r.group == g]
             if not members and g not in ("needs",):
@@ -870,6 +952,64 @@ class Board(App[None]):
 
     def action_cursor_up(self) -> None:
         self.query_one("#list", OptionList).action_cursor_up()
+
+    def action_toggle_grouping(self) -> None:
+        self.by_folder = not self.by_folder
+        prefs = _prefs()
+        prefs["by_folder"] = self.by_folder
+        _save_prefs(prefs)
+        self.notify(f"Grouped by {'folder' if self.by_folder else 'status'}", timeout=2)
+        self.render_list()
+
+    def action_new_session(self) -> None:
+        r = self.current()
+        if r is None or not r.cwd:
+            self.notify("Pick a session first: the new one starts in its folder", timeout=3)
+            return
+        self.new_cwd = r.cwd
+        box = self.query_one("#newtask", Input)
+        where = r.cwd.replace(str(HOME), "~")
+        empty = "  ·  empty + ⏎ opens claude there on the right" if self.side.available else ""
+        box.placeholder = f"new session in {where}: what should it do?  ⏎ starts it{empty}  ·  esc cancels"
+        box.value = ""
+        box.add_class("on")
+        box.focus()
+
+    @on(Input.Submitted, "#newtask")
+    def _newtask(self, e: Input.Submitted) -> None:
+        task = e.value.strip()
+        box = self.query_one("#newtask", Input)
+        box.remove_class("on")
+        box.value = ""
+        self.query_one("#list", OptionList).focus()
+        if not task and not self.side.available:
+            self.notify("Type a task: an empty one opens claude on the right, which needs the board in cmux", timeout=4)
+            return
+        self.run_new_session(self.new_cwd, task)
+
+    @work(thread=True, group="new")
+    def run_new_session(self, cwd: str, task: str) -> None:
+        if not task:
+            # An interactive session in that folder, in the side pane.
+            msg = self.side.show_command(f"cd {shlex.quote(cwd)} && claude", f"new:{cwd}:{time.time()}", f"claude in {short_folder(cwd)}", True)
+            self.call_from_thread(self.notify, msg, timeout=3)
+            return
+        job, msg = start_background(cwd, task)
+        self.call_from_thread(self.notify, msg, timeout=4)
+        if not job:
+            return
+        self.call_from_thread(self.load)
+        if self.side.available:
+            self.side.show_command(f"claude attach {job}", job, task[:40], False)
+
+    def action_cancel_input(self) -> None:
+        box = self.query_one("#newtask", Input)
+        if box.has_class("on"):
+            box.remove_class("on")
+            box.value = ""
+            self.query_one("#list", OptionList).focus()
+            return
+        self.action_clear_filter()
 
     def action_filter(self) -> None:
         f = self.query_one("#filter", Input)
