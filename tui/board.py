@@ -715,6 +715,7 @@ class Board(App[None]):
         Binding("enter", "jump", "open", priority=False),
         Binding("c", "new_session", "new"),
         Binding("a", "archive", "archive"),
+        Binding("f", "pin", "pin"),
         Binding("slash", "filter", "filter"),
         Binding("question_mark", "keys", "keys"),
         Binding("space", "peek", "peek", show=False),
@@ -747,6 +748,7 @@ class Board(App[None]):
         self.side = SideViewer()
         self.restart = False
         self.by_folder = bool(_prefs().get("by_folder"))
+        self._pins: set[str] = set()
         self.cursor_key = ""
         self.show_info = bool(_prefs().get("show_info"))
         self.new_cwd = ""
@@ -860,7 +862,25 @@ class Board(App[None]):
 
     # drawing
     def row_prompt(self, r: Row, now: float) -> Table:
-        return self._row_prompt(r, now, show_folder=not self.by_folder)
+        # Pinned rows sit outside their folder, so they name it.
+        return self._row_prompt(r, now, show_folder=not self.by_folder or self.is_pinned(r))
+
+    # pins: sessions kept in their own section at the top, by session id (stable across resumes)
+    def pins(self) -> set[str]:
+        return set(_marks("pins"))
+
+    def is_pinned(self, r: Row) -> bool:
+        return (r.session_id or r.key) in self._pins
+
+    def pinned_header_prompt(self, count: int) -> Table:
+        grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(no_wrap=True)
+        grid.add_column(ratio=1)
+        label = Text("★ ", style=f"bold {ACCENT}")
+        label.append("PINNED", style=f"bold {ACCENT}")
+        label.append(f"  {count}", style=FAINT)
+        grid.add_row(label, Rule(style=LINE))
+        return grid
 
     def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
         """bar · name · state · age, on one line. A second line (what it asks, or what it is
@@ -930,7 +950,7 @@ class Board(App[None]):
         grid.add_row(label, Rule(style=LINE))
         return grid
 
-    def folder_options(self, rows: list[Row], now: float) -> list[Option]:
+    def folder_options(self, rows: list[Row], now: float, before: list[Option] | None = None) -> list[Option]:
         """Sessions grouped by folder: folders that need you first, then the most recently active."""
         rows = [r for r in rows if r.group != "parked" or self.show_parked]
         folders: dict[str, list[Row]] = {}
@@ -944,7 +964,7 @@ class Board(App[None]):
 
         options: list[Option] = []
         for cwd, members in sorted(folders.items(), key=urgency_key):
-            options.append(Option(Padding(self.folder_header_prompt(cwd, members), (self._gap(options), 0, 0, 0)), id=f"hdr:{cwd}", disabled=True))
+            options.append(Option(Padding(self.folder_header_prompt(cwd, members), (self._gap((before or []) + options), 0, 0, 0)), id=f"hdr:{cwd}", disabled=True))
             done = [r for r in members if r.group in ("done", "parked")]
             active = [r for r in members if r.group not in ("done", "parked")]
             limit = len(done) if self.show_done else 3
@@ -962,8 +982,16 @@ class Board(App[None]):
         keep = ol.highlighted_option.id if ol.highlighted_option is not None else None
         options: list[Option] = []
         self.shown = []
+        self._pins = self.pins()
+        pinned = [r for r in rows if self.is_pinned(r)]
+        rows = [r for r in rows if not self.is_pinned(r)]
+        if pinned:
+            options.append(Option(Padding(self.pinned_header_prompt(len(pinned)), (1, 0, 0, 0)), id="hdr:pinned", disabled=True))
+            for r in pinned:
+                options.append(Option(self.row_prompt(r, now), id=f"row:{r.key}"))
+                self.shown.append(r)
         if self.by_folder:
-            options = self.folder_options(rows, now)
+            options += self.folder_options(rows, now, before=options)
         groups = [] if self.by_folder else [g for g in ORDER if g != "parked" or self.show_parked]
         for g in groups:
             members = [r for r in rows if r.group == g]
@@ -1171,6 +1199,9 @@ class Board(App[None]):
     def run_archive(self, r: Row) -> None:
         ok, msg = archive_session(r)
         if ok:
+            pins = _marks("pins")
+            if pins.pop(r.session_id or r.key, None) is not None:
+                _save_marks("pins", pins)
             self.side.drop(r.key)
 
             def drop() -> None:
@@ -1217,10 +1248,27 @@ class Board(App[None]):
     def action_cursor_up(self) -> None:
         self.query_one("#list", OptionList).action_cursor_up()
 
+    def action_pin(self) -> None:
+        r = self.current()
+        if r is None:
+            return
+        pins = _marks("pins")
+        sid = r.session_id or r.key
+        if sid in pins:
+            pins.pop(sid)
+            msg = f"Unpinned {r.name}"
+        else:
+            pins[sid] = time.time()
+            msg = f"Pinned {r.name}  ·  f again unpins"
+        _save_marks("pins", pins)
+        self.notify(msg, timeout=3)
+        self.render_list()
+
     def action_keys(self) -> None:
         self.notify(
             "⏎ open beside the board   space peek   x close sessions\n"
-            "c new session here   a archive   h hide · u unhide\n"
+            "c new session here   a archive   f pin · unpin\n"
+            "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"
             "p parked   d all done   n alerts   r refresh   q quit",
             title="keys", timeout=12,

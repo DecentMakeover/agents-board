@@ -38,6 +38,7 @@ Keys on the full-screen board:
 | `c` | start a new session in the selected session's folder (see below) |
 | `/` | filter by name, folder or question; `esc` clears |
 | `a` | archive the selected session now (see below) |
+| `f` | pin / unpin: keep a session in the Pinned section at the top |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
 | `d` | show every finished session, not just the latest 8 |
@@ -65,6 +66,12 @@ any other session, and in cmux it opens on the right so you can watch it start. 
 and press `⏎` to start it idle: it opens on the right with the cursor in it, ready for its first
 prompt. Either way it is a background session, so closing or replacing the side pane never ends it.
 A folder Claude Code doesn't trust yet answers with its trust message: run `claude` there once.
+
+**Pinned.** `f` pins the selected session: it moves into a ★ Pinned section at the top of the
+board, in folder and status view alike, with its folder named on the row, and keeps its live state
+and timer there. Pins are kept by session id in `~/.claude/agents-board/pins.json`, so they survive
+restarts and resumes, and a pinned session stays listed even once it is finished or parked. `f` again
+unpins it; archiving it drops the pin.
 
 **Archive.** `a` archives the selected session at once: its transcript (and session files) are
 copied to `~/.claude/session-archive/<sessionId>/`, safe from the 30-day transcript cleanup, and the
