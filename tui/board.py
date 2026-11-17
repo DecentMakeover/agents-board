@@ -834,9 +834,10 @@ class Board(App[None]):
     def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
         ms = now - r.since
         width = max(20, self.query_one("#list").size.width - 18 - PILL_WIDTH)
+        # name | status | timer: names line up on the left, the state sits by its timer.
         grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(width=PILL_WIDTH, no_wrap=True)
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+        grid.add_column(width=PILL_WIDTH, justify="right", no_wrap=True)
         grid.add_column(width=9, justify="right", no_wrap=True)
         name = Text(r.name, style=f"bold {TEXT}" if r.group in ("needs", "stuck", "working") else SOFT)
         if show_folder:
@@ -845,11 +846,11 @@ class Board(App[None]):
             name.append("  tab", style=f"{ACCENT}")
         if not r.pid and r.group in ("needs", "stuck"):
             name.append("  asleep", style=FAINT)
-        grid.add_row(status_pill(r), name, Text(age(ms), style=f"bold {urgency(r, ms)}"))
+        grid.add_row(name, status_pill(r), Text(age(ms), style=f"bold {urgency(r, ms)}"))
         note = r.note
         if r.reply:
             note = f"{note}  →  {r.reply}"
-        grid.add_row("", Text(note[: width * 2], style=DIM, overflow="ellipsis", no_wrap=True), "")
+        grid.add_row(Text(note[: width * 2], style=DIM, overflow="ellipsis", no_wrap=True), "", "")
         return grid
 
     def header_prompt(self, group: str, count: int) -> Table:
