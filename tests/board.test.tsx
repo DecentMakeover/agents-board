@@ -165,6 +165,7 @@ test('/board reuses a live board tab and replaces a dead one', async ($, on) => 
   on('fs.exists', () => ({ value: true }))
   on('fs.read', (_, e) => {
     if (e.path.endsWith('/running-WS-BOARD.json')) return { value: JSON.stringify({ pid: 1, at: beatAt }) }
+    if (e.path.endsWith('/running-WS-DEAD.json')) return { value: JSON.stringify({ pid: 2, at: NOW - 3_000_000 }) }
     throw new Error('ENOENT')
   })
   on('process.run', (_, e) => {
@@ -174,7 +175,8 @@ test('/board reuses a live board tab and replaces a dead one', async ($, on) => 
     if (argv[0] === '/bin/sh' && argv[2]?.includes('command -v uv')) return ok('/usr/bin/uv\n')
     if (argv[0] === '/bin/sh') return ok(HOME)
     if (argv.includes('workspace') && argv.includes('list')) {
-      return ok(JSON.stringify({ workspaces: [{ id: 'WS-BOARD', custom_title: '◆ agents board' }] }))
+      // A dead board tab left at a shell, listed before the live one.
+      return ok(JSON.stringify({ workspaces: [{ id: 'WS-DEAD', custom_title: '◆ agents board' }, { id: 'WS-BOARD', custom_title: '◆ agents board' }] }))
     }
     return ok()
   })
@@ -182,7 +184,9 @@ test('/board reuses a live board tab and replaces a dead one', async ($, on) => 
   const run = () => $.command.run({ command: 'board', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 
   expect((await run()).text).toBe('Switched to the agents board tab.')
-  expect(ran.some(a => a.includes('close-workspace'))).toBe(false)
+  expect(ran.some(a => a.includes('select-workspace') && a.includes('WS-BOARD'))).toBe(true)
+  expect(ran.some(a => a.includes('close-workspace') && a.includes('WS-DEAD'))).toBe(true)
+  expect(ran.some(a => a.includes('close-workspace') && a.includes('WS-BOARD'))).toBe(false)
 
   beatAt = NOW - 60_000 // the board quit: its heartbeat went stale
   ran.length = 0

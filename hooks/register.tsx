@@ -318,19 +318,19 @@ async function openFullBoard($: Engine): Promise<{ ok: boolean; text: string }> 
   if (list.ok) {
     try {
       const parsed = JSON.parse(list.stdout) as { workspaces?: { id?: string; custom_title?: string | null }[] }
-      const hit = parsed.workspaces?.find(w => w.custom_title === FULL_TITLE)
-      if (hit?.id) {
-        // Only switch to a tab where the board still runs; one left at a shell
-        // (the board quit or crashed) is replaced by a fresh one.
-        // The board writes a heartbeat every 3 s, keyed by its cmux workspace.
-        const beat = await readJson<{ at?: number }>($, `${hp}/.claude/agents-board/running-${hit.id}.json`)
-        if (typeof beat?.at === 'number' && (await $.clock.now()) - beat.at < 15_000) {
-          if ((await cmux($, ['select-workspace', '--workspace', hit.id])).ok) {
-            return { ok: true, text: 'Switched to the agents board tab.' }
-          }
-        } else {
-          await cmux($, ['close-workspace', '--workspace', hit.id, '--force'])
-        }
+      // Every board tab in this window: switch to one whose board still runs (its
+      // heartbeat is fresh), and close the ones left at a shell.
+      const tabs = (parsed.workspaces ?? []).filter(w => w.custom_title === FULL_TITLE && w.id)
+      const now = await $.clock.now()
+      let live: string | undefined
+      for (const w of tabs) {
+        const beat = await readJson<{ at?: number }>($, `${hp}/.claude/agents-board/running-${w.id}.json`)
+        const isLive = typeof beat?.at === 'number' && now - beat.at < 15_000
+        if (isLive && live === undefined) live = w.id
+        else if (!isLive) await cmux($, ['close-workspace', '--workspace', w.id as string, '--force'])
+      }
+      if (live !== undefined && (await cmux($, ['select-workspace', '--workspace', live])).ok) {
+        return { ok: true, text: 'Switched to the agents board tab.' }
       }
     } catch {
       // open a new one below
