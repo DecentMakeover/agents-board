@@ -1,0 +1,6 @@
+{
+  "name": "agents-board-mod",
+  "owner": { "name": "DecentMakeover" },
+  "metadata": { "description": "agents-board: one screen for every Claude Code session on your machine" },
+  "plugins": [{ "name": "agents-board", "source": "./" }]
+}

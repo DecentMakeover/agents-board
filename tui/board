@@ -1,0 +1,5 @@
+#!/bin/sh
+# Full-screen agents board. Needs uv (installs textual into uv's cache on first run).
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
+exec "$UV" run --quiet --script "$DIR/board.py" "$@"
