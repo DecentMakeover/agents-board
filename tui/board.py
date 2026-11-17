@@ -64,6 +64,8 @@ ORANGE = "#ff9f5a"
 RED = "#ff6b6b"
 TEAL = "#5fe3c0"
 SLATE = "#8c95a8"
+AMBER_SOFT = "#9c8247"   # needs you, but its process has exited ("asleep")
+RED_SOFT = "#a35a5a"
 
 GROUPS: dict[str, dict[str, str]] = {
     "needs": {"title": "NEEDS YOU", "color": AMBER, "glyph": "●", "chip": "need you"},
@@ -301,6 +303,31 @@ def urgency(row: Row, ms: float) -> str:
     if row.group == "stuck":
         return RED
     return GROUPS[row.group]["color"] if row.group == "working" else DIM
+
+
+def short_age(ms: float) -> str:
+    """One unit, for the list: now · 12m · 5h · 3d."""
+    sec = max(0, int(ms // 1000))
+    if sec < 60:
+        return "now"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def state_look(r: Row) -> tuple[str, str]:
+    """(word, colour) for a row's state; an asleep session that needs you is softer."""
+    live = bool(r.pid)
+    if r.group == "needs" and r.state == "failed":
+        return "failed", RED if live else RED_SOFT
+    if r.group == "needs":
+        return "needs you", AMBER if live else AMBER_SOFT
+    if r.group == "stuck":
+        return "stuck", RED if live else RED_SOFT
+    return {"working": ("working", TEAL), "idle": ("idle", SLATE), "done": ("done", FAINT),
+            "parked": ("parked", FAINT)}[r.group]
 
 
 def short_folder(cwd: str) -> str:
@@ -671,6 +698,7 @@ class Board(App[None]):
     }}
     #list:focus {{ border: none; }}
     #list > .option-list--option {{ padding: 0 1; }}
+    #top {{ height: 3; padding: 1 3 0 3; }}
     #list > .option-list--option-highlighted {{ background: #1a2130; text-style: none; }}
     #list:focus > .option-list--option-highlighted {{ background: #1f2840; text-style: none; }}
     #list > .option-list--option-disabled {{ text-style: none; color: {TEXT}; }}
@@ -683,24 +711,26 @@ class Board(App[None]):
     """
 
     BINDINGS = [
+        # The footer shows the everyday keys; ? lists the rest.
         Binding("enter", "jump", "open", priority=False),
-        Binding("space", "peek", "peek"),
-        Binding("x", "close_side", "close sessions"),
-        Binding("c", "new_session", "new here"),
-        Binding("g", "toggle_grouping", "by folder/status"),
-        Binding("i", "toggle_info", "info"),
-        Binding("slash", "filter", "filter"),
+        Binding("c", "new_session", "new"),
         Binding("a", "archive", "archive"),
-        Binding("h", "hide", "hide"),
+        Binding("slash", "filter", "filter"),
+        Binding("question_mark", "keys", "keys"),
+        Binding("space", "peek", "peek", show=False),
+        Binding("x", "close_side", "close sessions", show=False),
+        Binding("g", "toggle_grouping", "by folder/status", show=False),
+        Binding("i", "toggle_info", "info", show=False),
+        Binding("h", "hide", "hide", show=False),
         Binding("u", "unhide", "unhide all", show=False),
-        Binding("p", "toggle_parked", "parked"),
-        Binding("d", "toggle_done", "all done"),
-        Binding("n", "toggle_alerts", "alerts"),
-        Binding("r", "reload", "refresh"),
+        Binding("p", "toggle_parked", "parked", show=False),
+        Binding("d", "toggle_done", "all done", show=False),
+        Binding("n", "toggle_alerts", "alerts", show=False),
+        Binding("r", "reload", "refresh", show=False),
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
         Binding("escape", "cancel_input", show=False),
-        Binding("q", "quit", "quit"),
+        Binding("q", "quit", "quit", show=False),
     ]
 
     def __init__(self) -> None:
@@ -717,6 +747,7 @@ class Board(App[None]):
         self.side = SideViewer()
         self.restart = False
         self.by_folder = bool(_prefs().get("by_folder"))
+        self.cursor_key = ""
         self.show_info = bool(_prefs().get("show_info"))
         self.new_cwd = ""
 
@@ -832,25 +863,35 @@ class Board(App[None]):
         return self._row_prompt(r, now, show_folder=not self.by_folder)
 
     def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
+        """bar · name · state · age, on one line. A second line (what it asks, or what it is
+        doing) only where it matters: sessions that want you, and the row under the cursor."""
         ms = now - r.since
-        width = max(20, self.query_one("#list").size.width - 18 - PILL_WIDTH)
-        # name | status | timer: names line up on the left, the state sits by its timer.
+        word, color = state_look(r)
+        attention = r.group in ("needs", "stuck")
+        expanded = attention or self.cursor_key == r.key
         grid = Table.grid(expand=True, padding=(0, 1))
+        grid.add_column(width=1, no_wrap=True)
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-        grid.add_column(width=PILL_WIDTH, justify="right", no_wrap=True)
         grid.add_column(width=9, justify="right", no_wrap=True)
-        name = Text(r.name, style=f"bold {TEXT}" if r.group in ("needs", "stuck", "working") else SOFT)
+        grid.add_column(width=4, justify="right", no_wrap=True)
+        bar = Text("▍", style=color)
+        name_style = f"bold {TEXT}" if attention else TEXT if r.group == "working" else SOFT if r.group == "idle" else DIM
+        name = Text(r.name, style=name_style)
         if show_folder:
-            name.append(f"  {short_folder(r.cwd)}", style=FAINT)
+            name.append(f"   {short_folder(r.cwd)}", style=FAINT)
         if r.kind == "tab":
-            name.append("  tab", style=f"{ACCENT}")
-        if not r.pid and r.group in ("needs", "stuck"):
-            name.append("  asleep", style=FAINT)
-        grid.add_row(name, status_pill(r), Text(age(ms), style=f"bold {urgency(r, ms)}"))
-        note = r.note
-        if r.reply:
-            note = f"{note}  →  {r.reply}"
-        grid.add_row(Text(note[: width * 2], style=DIM, overflow="ellipsis", no_wrap=True), "", "")
+            name.append("   tab", style=ACCENT)
+        timer_style = f"bold {urgency(r, ms)}" if attention and r.pid else FAINT if r.group in ("done", "parked") else DIM
+        grid.add_row(bar, name, Text(word, style=f"bold {color}" if attention else color),
+                     Text(short_age(ms), style=timer_style))
+        if expanded:
+            note = r.note
+            if r.reply and attention:
+                note = f"{note}  →  {r.reply}"
+            grid.add_row(Text("▍", style=color) if attention else "", Text(note, style=DIM, overflow="ellipsis", no_wrap=True), "", "")
+        if attention:
+            # A two-line row gets a line of air below it, so questions don't run together.
+            grid.add_row("", "", "", "")
         return grid
 
     def header_prompt(self, group: str, count: int) -> Table:
@@ -863,19 +904,29 @@ class Board(App[None]):
         grid.add_row(label, Rule(style=LINE))
         return grid
 
+    def _gap(self, options: list[Option]) -> int:
+        """A header's top margin: none when the row above already left a line of air."""
+        if not options or not (options[-1].id or "").startswith("row:"):
+            return 1
+        key = (options[-1].id or "")[4:]
+        r = next((x for x in self.shown if x.key == key), None)
+        return 0 if r is not None and r.group in ("needs", "stuck") else 1
+
     def folder_header_prompt(self, cwd: str, members: list[Row]) -> Table:
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(no_wrap=True)
         grid.add_column(ratio=1)
-        label = Text(short_folder(cwd) or "?", style=f"bold {TEXT}")
+        where = short_folder(cwd) or "?"
+        head, _, leaf = where.rpartition("/")
+        label = Text(f"{head}/" if head else "", style=FAINT)
+        label.append(leaf, style=f"bold {TEXT}")
         words = {"needs": "need you", "stuck": "stuck", "working": "working", "idle": "idle", "done": "done", "parked": "parked"}
-        first = True
         for g in ORDER:
             n = sum(1 for r in members if r.group == g)
             if n:
-                label.append("   " if first else "  ·  ", style=FAINT)
-                label.append(f"{n} {words[g]}", style=f"bold {GROUPS[g]['color']}" if g in ("needs", "stuck", "working") else GROUPS[g]["color"])
-                first = False
+                label.append("    ")
+                label.append(str(n), style=f"bold {GROUPS[g]['color']}" if g in ("needs", "stuck", "working") else FAINT)
+                label.append(f" {words[g]}", style=FAINT)
         grid.add_row(label, Rule(style=LINE))
         return grid
 
@@ -893,7 +944,7 @@ class Board(App[None]):
 
         options: list[Option] = []
         for cwd, members in sorted(folders.items(), key=urgency_key):
-            options.append(Option(Padding(self.folder_header_prompt(cwd, members), (1, 0, 0, 0)), id=f"hdr:{cwd}", disabled=True))
+            options.append(Option(Padding(self.folder_header_prompt(cwd, members), (self._gap(options), 0, 0, 0)), id=f"hdr:{cwd}", disabled=True))
             done = [r for r in members if r.group in ("done", "parked")]
             active = [r for r in members if r.group not in ("done", "parked")]
             limit = len(done) if self.show_done else 3
@@ -918,7 +969,7 @@ class Board(App[None]):
             members = [r for r in rows if r.group == g]
             if not members and g not in ("needs",):
                 continue
-            options.append(Option(Padding(self.header_prompt(g, len(members)), (1, 0, 0, 0)), id=f"hdr:{g}", disabled=True))
+            options.append(Option(Padding(self.header_prompt(g, len(members)), (self._gap(options), 0, 0, 0)), id=f"hdr:{g}", disabled=True))
             if not members:
                 options.append(Option(Text("   nothing is waiting on you", style=f"italic {DIM}"), id="empty:needs", disabled=True))
             limit = len(members) if (g != "done" or self.show_done) else DONE_SHOWN
@@ -949,6 +1000,7 @@ class Board(App[None]):
         self.render_detail()
 
     def render_top(self) -> None:
+        """◆ agents, then only the counts worth a glance; problems on the right."""
         rows = self.visible()
         count = {g: sum(1 for r in rows if r.group == g) for g in ORDER}
         grid = Table.grid(expand=True)
@@ -958,20 +1010,26 @@ class Board(App[None]):
         left.append("agents", style=f"bold {TEXT}")
         if DEMO:
             left.append("  demo", style=f"italic {DIM}")
-        left.append("   ")
-        for g in ["needs", "stuck", "working", "idle", "done"]:
-            n = count[g]
-            color = GROUPS[g]["color"] if n else FAINT
-            left.append_text(chip(str(n), color, solid=n > 0 and g in ("needs", "stuck")))
-            left.append(f" {GROUPS[g]['chip']}    ", style=SOFT if n else FAINT)
+        left.append("     ")
+        if count["needs"]:
+            left.append_text(chip(str(count["needs"]), AMBER))
+            left.append(" need you", style=SOFT)
+        else:
+            left.append("nothing needs you", style=f"italic {DIM}")
+        if count["stuck"]:
+            left.append("     ")
+            left.append_text(chip(str(count["stuck"]), RED))
+            left.append(" stuck", style=SOFT)
+        if count["working"]:
+            left.append(f"     {count['working']}", style=f"bold {TEAL}")
+            left.append(" working", style=DIM)
         right = Text()
         if self.error:
-            right.append(f"⚠ {self.error[:60]}   ", style=RED)
-        elif self.loaded_at:
-            right.append(f"synced {age(time.time() * 1000 - self.loaded_at)} ago   ", style=FAINT)
-        if not self.alerts:
-            right.append("alerts off   ", style=FAINT)
-        right.append(datetime.now().strftime("%a %H:%M:%S"), style=SOFT)
+            right.append(f"⚠ {self.error[:50]}", style=RED)
+        elif self.loaded_at and time.time() * 1000 - self.loaded_at > 30_000:
+            right.append(f"stale · synced {short_age(time.time() * 1000 - self.loaded_at)} ago", style=RED)
+        elif not self.alerts:
+            right.append("alerts off", style=FAINT)
         grid.add_row(left, right)
         self.query_one("#top", Static).update(grid)
 
@@ -1050,6 +1108,12 @@ class Board(App[None]):
     # events
     @on(OptionList.OptionHighlighted)
     def _highlighted(self) -> None:
+        # The row under the cursor shows its second line: redraw when it moves.
+        r = self.current()
+        key = r.key if r else ""
+        if key != self.cursor_key:
+            self.cursor_key = key
+            self.tick()
         self.render_detail()
 
     @on(OptionList.OptionSelected)
@@ -1152,6 +1216,15 @@ class Board(App[None]):
 
     def action_cursor_up(self) -> None:
         self.query_one("#list", OptionList).action_cursor_up()
+
+    def action_keys(self) -> None:
+        self.notify(
+            "⏎ open beside the board   space peek   x close sessions\n"
+            "c new session here   a archive   h hide · u unhide\n"
+            "g by folder / by status   i info panel   / filter\n"
+            "p parked   d all done   n alerts   r refresh   q quit",
+            title="keys", timeout=12,
+        )
 
     def action_toggle_grouping(self) -> None:
         self.by_folder = not self.by_folder

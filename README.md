@@ -88,11 +88,11 @@ terminal bell and, in cmux, sends a cmux notification.
 
 Within Needs you and Stuck, running sessions come first, then the longest-waiting.
 
-Every row carries its state in words: **NEEDS YOU**, **FAILED** and **STUCK** as solid blocks (they
-want you), **WORKING**, **IDLE** and **DONE** as coloured text. Grouped by folder, each folder's
-header spells its counts out ("1 need you · 2 working · 7 done") and lists what needs you first.
-
-The timer turns amber, orange, then red the longer a session has waited.
+Every row is one line: a coloured bar and the state in words on the right (**needs you**, **failed**,
+**stuck** in amber or red, **working** in green, **idle** and **done** in grey), with a one-unit age
+(now · 12m · 5h · 3d). Sessions that want you get a second line with what they ask, and so does the
+row under the cursor. A session that needs you but whose process has exited is drawn in a softer
+colour. The footer lists the everyday keys; `?` lists them all.
 
 ## Requirements
 
