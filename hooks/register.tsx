@@ -102,7 +102,7 @@ async function marks($: Engine, key: string): Promise<Marks> {
 }
 
 async function listAgents($: Engine): Promise<AgentRow[]> {
-  const r = await $.process.run(['claude', 'agents', '--json'], { stdin: '', timeoutMs: 30_000 })
+  const r = await $.process.run(['claude', 'agents', '--json', '--all'], { stdin: '', timeoutMs: 30_000 })
   if (r.exitCode !== 0) throw new Error(`claude agents failed: ${(r.stderr || r.stdout).slice(0, 200)}`)
   const start = r.stdout.indexOf('[')
   const rows: unknown = JSON.parse(start < 0 ? '[]' : r.stdout.slice(start))

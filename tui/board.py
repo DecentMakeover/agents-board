@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -258,7 +259,8 @@ def demo_rows() -> list[Row]:
 def load_rows() -> list[Row]:
     if DEMO:
         return demo_rows()
-    out = subprocess.run(["claude", "agents", "--json"], capture_output=True, text=True, timeout=30)
+    # --all: finished background sessions whose process has exited are left out otherwise.
+    out = subprocess.run(["claude", "agents", "--json", "--all"], capture_output=True, text=True, timeout=30)
     if out.returncode != 0:
         raise RuntimeError((out.stderr or out.stdout).strip()[:200])
     start = out.stdout.find("[")
@@ -384,6 +386,58 @@ def start_background(cwd: str, task: str) -> tuple[str, str]:
         why = (out.stderr or out.stdout).strip().splitlines()
         return "", why[-1][:160] if why else f"claude exited {out.returncode}"
     return m.group(1), f"Started a session in {short_folder(cwd)}"
+
+
+ARCHIVE = CLAUDE / "session-archive"
+ARCHIVABLE = {"done", "failed", "stopped", "blocked"}
+
+
+def archive_session(row: Row) -> tuple[bool, str]:
+    """Archive the way the session-archive mod does, so `/unarchive` and its pane see it:
+    copy the transcript (and its folder) to ~/.claude/session-archive/<sessionId>/, `claude rm`
+    the session, then write meta.json. Nothing is marked archived unless `claude rm` worked.
+    """
+    if row.kind != "bg" or not row.id:
+        return False, f"{row.name} is an interactive tab: close its tab to end it"
+    if row.state not in ARCHIVABLE:
+        return False, f"{row.name} is still {row.state or 'running'}: let it finish or stop it first"
+    if row.pid:
+        # Make the transcript final before copying it.
+        subprocess.run(["claude", "stop", row.id], capture_output=True, text=True, timeout=60)
+    dest = ARCHIVE / row.session_id
+    dest.mkdir(parents=True, exist_ok=True)
+    src = CLAUDE / "projects" / project_dir(row.cwd) / f"{row.session_id}.jsonl"
+    if not src.exists():
+        src = next(iter((CLAUDE / "projects").glob(f"*/{row.session_id}.jsonl")), src)
+    has_transcript = src.exists()
+    if has_transcript:
+        try:
+            shutil.copy2(src, dest / "transcript.jsonl")
+            if (dest / "transcript.jsonl").stat().st_size != src.stat().st_size:
+                return False, f"{row.name}: copy size mismatch, not archived"
+            sibling = src.with_suffix("")
+            if sibling.is_dir():
+                shutil.copytree(sibling, dest / "transcript-files", dirs_exist_ok=True)
+        except OSError as err:
+            return False, f"{row.name}: copy failed ({err}), not archived"
+    rm = subprocess.run(["claude", "rm", row.id], capture_output=True, text=True, timeout=60)
+    if rm.returncode != 0:
+        return False, f"{row.name}: claude rm refused: {(rm.stderr or rm.stdout).strip()[:160]}"
+    job = _read_json(CLAUDE / "jobs" / row.id / "state.json")
+    meta = {
+        "id": row.id,
+        "sessionId": row.session_id,
+        "name": row.name,
+        "cwd": row.cwd,
+        "state": row.state,
+        "detail": row.latest,
+        "intent": _s(job.get("displayIntent")) or _s(job.get("intent")) or row.intent,
+        "archivedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "hasTranscript": has_transcript,
+        "transcriptPath": str(src) if has_transcript else "",
+    }
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return True, f"Archived {row.name}  ·  /unarchive {row.id} brings it back"
 
 
 def _prefs() -> dict[str, Any]:
@@ -545,6 +599,7 @@ class Board(App[None]):
         Binding("c", "new_session", "new here"),
         Binding("g", "toggle_grouping", "by folder/status"),
         Binding("slash", "filter", "filter"),
+        Binding("a", "archive", "archive"),
         Binding("h", "hide", "hide"),
         Binding("u", "unhide", "unhide all", show=False),
         Binding("p", "toggle_parked", "parked"),
@@ -878,6 +933,9 @@ class Board(App[None]):
             hint.append("peek", style=DIM)
         else:
             hint.append("jump to its tab" if Path(CMUX).exists() else f"claude attach {r.id}", style=DIM)
+        if r.kind == "bg" and r.state in ARCHIVABLE:
+            hint.append("   a ", style=f"bold {ACCENT}")
+            hint.append("archive", style=DIM)
         hint.append("   h ", style=f"bold {ACCENT}")
         hint.append("hide", style=DIM)
         parts.append(hint)
@@ -929,6 +987,30 @@ class Board(App[None]):
     def run_close_side(self) -> None:
         msg = self.side.close()
         self.call_from_thread(self.notify, msg, timeout=3)
+
+    def action_archive(self) -> None:
+        r = self.current()
+        if r is None:
+            return
+        if DEMO:
+            self.notify(f"demo mode · this would archive {r.name}", timeout=3)
+            return
+        self.run_archive(r)
+
+    @work(thread=True, group="archive")
+    def run_archive(self, r: Row) -> None:
+        ok, msg = archive_session(r)
+        if ok:
+            if self.side.key == r.key:
+                self.side.close()
+
+            def drop() -> None:
+                self.rows = [x for x in self.rows if x.key != r.key]
+                self.render_list()
+
+            self.call_from_thread(drop)
+            self.call_from_thread(self.load)
+        self.call_from_thread(self.notify, msg, severity="information" if ok else "warning", timeout=5)
 
     def action_hide(self) -> None:
         r = self.current()

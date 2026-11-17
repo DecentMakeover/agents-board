@@ -36,6 +36,7 @@ Keys on the full-screen board:
 | `g` | group by folder instead of by status (remembered) |
 | `c` | start a new session in the selected session's folder (see below) |
 | `/` | filter by name, folder or question; `esc` clears |
+| `a` | archive the selected session now (see below) |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
 | `d` | show every finished session, not just the latest 8 |
@@ -62,6 +63,12 @@ any other session, and in cmux it opens on the right so you can watch it start. 
 and press `⏎` to start it idle: it opens on the right with the cursor in it, ready for its first
 prompt. Either way it is a background session, so closing or replacing the side pane never ends it.
 A folder Claude Code doesn't trust yet answers with its trust message: run `claude` there once.
+
+**Archive.** `a` archives the selected session at once: its transcript (and session files) are
+copied to `~/.claude/session-archive/<sessionId>/`, safe from the 30-day transcript cleanup, and the
+session is removed from `claude agents`. A background session that is done, failed, stopped or
+waiting for input can be archived; a running process is stopped first. The format matches the
+session-archive mod, so `/unarchive <id>` there brings it back idle under the same id.
 
 **Alerts.** When a session newly needs you or looks stuck, the board shows a toast, rings the
 terminal bell and, in cmux, sends a cmux notification.
@@ -93,7 +100,7 @@ The timer turns amber, orange, then red the longer a session has waited.
 
 Every 5 seconds (10 for the pane, and only while it is open) it reads:
 
-- `claude agents --json`: every live session and background job, with its state;
+- `claude agents --json --all`: every session and background job, finished ones included, with its state;
 - `~/.claude/jobs/<id>/state.json`: what a background job is asking, its suggested reply,
   whether it has background tasks in flight, and when it last changed;
 - `~/.claude/sessions/<pid>.json` and the transcript's modification time: when a session last did
