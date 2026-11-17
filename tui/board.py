@@ -316,6 +316,31 @@ def chip(label: str, color: str, *, solid: bool = True) -> Text:
     return t
 
 
+PILL_WIDTH = 11
+
+
+def status_pill(r: Row) -> Text:
+    """The row's state in words, in a fixed-width column. What needs you is a solid
+    block (needs you / failed / stuck); what doesn't is coloured text only."""
+    if r.group == "needs" and r.state == "failed":
+        label, color, solid = "FAILED", RED, True
+    elif r.group == "needs":
+        label, color, solid = "NEEDS YOU", AMBER, True
+    elif r.group == "stuck":
+        label, color, solid = "STUCK", RED, True
+    elif r.group == "working":
+        label, color, solid = "WORKING", TEAL, False
+    elif r.group == "idle":
+        label, color, solid = "IDLE", SLATE, False
+    elif r.group == "done":
+        label, color, solid = "DONE", DIM, False
+    else:
+        label, color, solid = "PARKED", FAINT, False
+    t = Text()
+    t.append(f" {label} ", style=f"bold {BG} on {color}" if solid else f"bold {color}")
+    return t
+
+
 # ── persisted per-viewer marks ─────────────────────────────────────────────
 def _marks(name: str) -> dict[str, float]:
     return _read_json(STATE / f"{name}.json")
@@ -807,12 +832,10 @@ class Board(App[None]):
         return self._row_prompt(r, now, show_folder=not self.by_folder)
 
     def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
-        g = GROUPS[r.group]
         ms = now - r.since
-        glyph = g["glyph"] if r.pid or r.group in ("done", "parked") else ("○" if r.group == "needs" else "△" if r.group == "stuck" else g["glyph"])
-        width = max(20, self.query_one("#list").size.width - 18)
+        width = max(20, self.query_one("#list").size.width - 18 - PILL_WIDTH)
         grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(width=2, no_wrap=True)
+        grid.add_column(width=PILL_WIDTH, no_wrap=True)
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         grid.add_column(width=9, justify="right", no_wrap=True)
         name = Text(r.name, style=f"bold {TEXT}" if r.group in ("needs", "stuck", "working") else SOFT)
@@ -822,7 +845,7 @@ class Board(App[None]):
             name.append("  tab", style=f"{ACCENT}")
         if not r.pid and r.group in ("needs", "stuck"):
             name.append("  asleep", style=FAINT)
-        grid.add_row(Text(glyph, style=f"bold {g['color']}"), name, Text(age(ms), style=f"bold {urgency(r, ms)}"))
+        grid.add_row(status_pill(r), name, Text(age(ms), style=f"bold {urgency(r, ms)}"))
         note = r.note
         if r.reply:
             note = f"{note}  →  {r.reply}"
@@ -844,10 +867,14 @@ class Board(App[None]):
         grid.add_column(no_wrap=True)
         grid.add_column(ratio=1)
         label = Text(short_folder(cwd) or "?", style=f"bold {TEXT}")
+        words = {"needs": "need you", "stuck": "stuck", "working": "working", "idle": "idle", "done": "done", "parked": "parked"}
+        first = True
         for g in ORDER:
             n = sum(1 for r in members if r.group == g)
             if n:
-                label.append(f"   {GROUPS[g]['glyph']} {n}", style=f"bold {GROUPS[g]['color']}")
+                label.append("   " if first else "  ·  ", style=FAINT)
+                label.append(f"{n} {words[g]}", style=f"bold {GROUPS[g]['color']}" if g in ("needs", "stuck", "working") else GROUPS[g]["color"])
+                first = False
         grid.add_row(label, Rule(style=LINE))
         return grid
 
