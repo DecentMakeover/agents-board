@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import time
@@ -369,9 +368,15 @@ def cmux_notify(title: str, body: str) -> None:
 
 
 def start_background(cwd: str, task: str) -> tuple[str, str]:
-    """`claude --bg "<task>"` in `cwd`. Answers (job id, message); the id is empty on failure."""
+    """`claude --bg ["<task>"]` in `cwd`; with no task the session starts idle, waiting
+    for its first prompt. Answers (job id, message); the id is empty on failure.
+
+    Always a background session, never a plain interactive one: it shows on the board
+    with its status, and closing the side pane only detaches it.
+    """
     try:
-        out = subprocess.run(["claude", "--bg", task], cwd=cwd, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(["claude", "--bg", *([task] if task else [])], cwd=cwd, capture_output=True,
+                             text=True, timeout=60, stdin=subprocess.DEVNULL)
     except Exception as err:
         return "", f"could not start claude: {err}"
     m = re.search(r"claude attach ([0-9a-f]{6,})", out.stdout)
@@ -438,8 +443,20 @@ class SideViewer:
         except Exception:
             return []
 
+    def _pane_of(self, surface: str, tries: int = 1) -> str:
+        """The pane holding `surface`. Right after a split cmux may not list it yet: retry."""
+        for attempt in range(tries):
+            for p in self._panes():
+                if surface in (p.get("surface_refs") or []) or surface in (p.get("surface_ids") or []):
+                    return _s(p.get("ref"))
+            if attempt + 1 < tries:
+                time.sleep(0.25)
+        return ""
+
     def _still_there(self) -> bool:
         """Is our pane still open, holding our surface? (The person may have closed it.)"""
+        if not self.pane and self.surface:
+            self.pane = self._pane_of(self.surface)
         if not self.pane:
             return False
         for p in self._panes():
@@ -473,11 +490,7 @@ class SideViewer:
             if made.returncode != 0:
                 return f"cmux: {made.stderr.strip()[:120]}"
             self.surface = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
-            self.pane = next(
-                (p.get("ref", "") for p in self._panes()
-                 if self.surface in (p.get("surface_refs") or []) or self.surface in (p.get("surface_ids") or [])),
-                "",
-            )
+            self.pane = self._pane_of(self.surface, tries=8)
         if focus and self.surface:
             # Some cmux builds take focus on new-surface only within the pane; make it explicit.
             _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
@@ -969,8 +982,7 @@ class Board(App[None]):
         self.new_cwd = r.cwd
         box = self.query_one("#newtask", Input)
         where = r.cwd.replace(str(HOME), "~")
-        empty = "  ·  empty + ⏎ opens claude there on the right" if self.side.available else ""
-        box.placeholder = f"new session in {where}: what should it do?  ⏎ starts it{empty}  ·  esc cancels"
+        box.placeholder = f"new session in {where}: what should it do?  ⏎ starts it  ·  empty ⏎ starts it idle  ·  esc cancels"
         box.value = ""
         box.add_class("on")
         box.focus()
@@ -982,25 +994,24 @@ class Board(App[None]):
         box.remove_class("on")
         box.value = ""
         self.query_one("#list", OptionList).focus()
-        if not task and not self.side.available:
-            self.notify("Type a task: an empty one opens claude on the right, which needs the board in cmux", timeout=4)
-            return
         self.run_new_session(self.new_cwd, task)
 
     @work(thread=True, group="new")
     def run_new_session(self, cwd: str, task: str) -> None:
-        if not task:
-            # An interactive session in that folder, in the side pane.
-            msg = self.side.show_command(f"cd {shlex.quote(cwd)} && claude", f"new:{cwd}:{time.time()}", f"claude in {short_folder(cwd)}", True)
-            self.call_from_thread(self.notify, msg, timeout=3)
-            return
         job, msg = start_background(cwd, task)
-        self.call_from_thread(self.notify, msg, timeout=4)
         if not job:
+            self.call_from_thread(self.notify, msg, severity="error", timeout=6)
             return
         self.call_from_thread(self.load)
         if self.side.available:
-            self.side.show_command(f"claude attach {job}", job, task[:40], False)
+            # With a task, watch it start without leaving the board; without one,
+            # put the cursor in it so the first prompt can be typed right away.
+            label = task[:40] or f"new session in {short_folder(cwd)}"
+            self.side.show_command(f"claude attach {job}", job, label, focus=not task)
+            msg += " · on the right" + ("" if task else ": type its first prompt there")
+        else:
+            msg += f" · claude attach {job}"
+        self.call_from_thread(self.notify, msg, timeout=5)
 
     def action_cancel_input(self) -> None:
         box = self.query_one("#newtask", Input)
