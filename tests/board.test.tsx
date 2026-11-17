@@ -150,3 +150,43 @@ test('/board groups every session and Enter jumps through cmux', async ($, on) =
   expect(ran.some(a => a.includes('select-workspace') && a.includes('WS-D'))).toBe(true)
   await ui.unmount()
 })
+
+test('/board reuses a live board tab and replaces a dead one', async ($, on) => {
+  let beatAt = NOW - 2000
+  const ran: string[][] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'self' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', (_, e) => {
+    if (e.path.endsWith('/running-WS-BOARD.json')) return { value: JSON.stringify({ pid: 1, at: beatAt }) }
+    throw new Error('ENOENT')
+  })
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+    ran.push(argv)
+    const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (argv[0] === '/bin/sh' && argv[2]?.includes('command -v uv')) return ok('/usr/bin/uv\n')
+    if (argv[0] === '/bin/sh') return ok(HOME)
+    if (argv.includes('workspace') && argv.includes('list')) {
+      return ok(JSON.stringify({ workspaces: [{ id: 'WS-BOARD', custom_title: '◆ agents board' }] }))
+    }
+    return ok()
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const run = () => $.command.run({ command: 'board', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  expect((await run()).text).toBe('Switched to the agents board tab.')
+  expect(ran.some(a => a.includes('close-workspace'))).toBe(false)
+
+  beatAt = NOW - 60_000 // the board quit: its heartbeat went stale
+  ran.length = 0
+  expect((await run()).text).toBe('Opened the agents board in its own cmux tab.')
+  expect(ran.some(a => a.includes('close-workspace') && a.includes('WS-BOARD'))).toBe(true)
+  expect(ran.some(a => a.includes('new-workspace'))).toBe(true)
+})

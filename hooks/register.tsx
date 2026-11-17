@@ -319,8 +319,18 @@ async function openFullBoard($: Engine): Promise<{ ok: boolean; text: string }> 
     try {
       const parsed = JSON.parse(list.stdout) as { workspaces?: { id?: string; custom_title?: string | null }[] }
       const hit = parsed.workspaces?.find(w => w.custom_title === FULL_TITLE)
-      if (hit?.id && (await cmux($, ['select-workspace', '--workspace', hit.id])).ok) {
-        return { ok: true, text: 'Switched to the agents board tab.' }
+      if (hit?.id) {
+        // Only switch to a tab where the board still runs; one left at a shell
+        // (the board quit or crashed) is replaced by a fresh one.
+        // The board writes a heartbeat every 3 s, keyed by its cmux workspace.
+        const beat = await readJson<{ at?: number }>($, `${hp}/.claude/agents-board/running-${hit.id}.json`)
+        if (typeof beat?.at === 'number' && (await $.clock.now()) - beat.at < 15_000) {
+          if ((await cmux($, ['select-workspace', '--workspace', hit.id])).ok) {
+            return { ok: true, text: 'Switched to the agents board tab.' }
+          }
+        } else {
+          await cmux($, ['close-workspace', '--workspace', hit.id, '--force'])
+        }
       }
     } catch {
       // open a new one below

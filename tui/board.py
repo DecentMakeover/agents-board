@@ -45,6 +45,8 @@ STUCK_MS = 15 * 60_000
 PARK_MS = 2 * 86_400_000
 DONE_SHOWN = 8
 DEMO = "--demo" in sys.argv[1:]
+SELF = Path(__file__).resolve()
+SELF_MTIME = SELF.stat().st_mtime
 
 # ── palette ────────────────────────────────────────────────────────────────
 BG = "#0d1017"
@@ -379,6 +381,22 @@ class SideViewer:
         self.pane = ""
         self.surface = ""
         self.key = ""
+        self._restore()
+
+    # The board restarts itself on update: keep the side pane it opened.
+    def _file(self) -> Path:
+        return STATE / f"side-{self.workspace or 'none'}.json"
+
+    def _restore(self) -> None:
+        saved = _read_json(self._file())
+        self.pane, self.surface, self.key = (_s(saved.get(k)) for k in ("pane", "surface", "key"))
+
+    def _save(self) -> None:
+        try:
+            STATE.mkdir(parents=True, exist_ok=True)
+            self._file().write_text(json.dumps({"pane": self.pane, "surface": self.surface, "key": self.key}))
+        except OSError:
+            pass
 
     @property
     def available(self) -> bool:
@@ -435,6 +453,7 @@ class SideViewer:
             # Some cmux builds take focus on new-surface only within the pane; make it explicit.
             _cmux("focus-panel", "--panel", self.surface, "--workspace", self.workspace)
         self.key = row.key
+        self._save()
         return f"{row.name} opened on the right"
 
     def close(self) -> str:
@@ -445,6 +464,7 @@ class SideViewer:
                 for ref in p.get("surface_refs") or []:
                     _cmux("close-surface", "--surface", ref, "--workspace", self.workspace, "--force")
         self.pane = self.surface = self.key = ""
+        self._save()
         return "Side pane closed (the session keeps running)"
 
 
@@ -503,6 +523,7 @@ class Board(App[None]):
         self.query_text = ""
         self.shown: list[Row] = []
         self.side = SideViewer()
+        self.restart = False
 
     # layout
     def compose(self) -> ComposeResult:
@@ -520,6 +541,27 @@ class Board(App[None]):
         self.load()
         self.set_interval(5, self.load)
         self.set_interval(1, self.tick)
+        self.set_interval(3, self.check_update)
+        self.check_update()
+        if os.environ.pop("AGENTS_BOARD_UPDATED", None):
+            self.notify("Board updated to the latest version", timeout=6)
+
+    def check_update(self) -> None:
+        """Heartbeat for /board, and a newer board.py on disk (an update): restart into it."""
+        ws = os.environ.get("CMUX_WORKSPACE_ID", "")
+        if ws and not DEMO:
+            try:
+                STATE.mkdir(parents=True, exist_ok=True)
+                (STATE / f"running-{ws}.json").write_text(json.dumps({"pid": os.getpid(), "at": time.time() * 1000}))
+            except OSError:
+                pass
+        try:
+            changed = SELF.stat().st_mtime != SELF_MTIME
+        except OSError:
+            return
+        if changed:
+            self.restart = True
+            self.exit()
 
     def on_resize(self) -> None:
         self.query_one("#side").set_class(self.size.width < 110, "hidden")
@@ -844,4 +886,8 @@ class Board(App[None]):
 
 
 if __name__ == "__main__":
-    Board().run()
+    app = Board()
+    app.run()
+    if app.restart:
+        os.environ["AGENTS_BOARD_UPDATED"] = "1"
+        os.execv(sys.executable, [sys.executable, str(SELF), *sys.argv[1:]])
