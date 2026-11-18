@@ -35,7 +35,7 @@ Keys on the full-screen board:
 | `x` | close the session columns (the sessions keep running) |
 | `i` | show the info panel: full question, suggested reply, original ask (remembered) |
 | `g` | group by folder instead of by status (remembered) |
-| `c` | start a new session in the selected session's folder (see below) |
+| `c` | start a new session in the selected session's folder, opened beside the board |
 | `/` | filter by name, folder or question; `esc` clears |
 | `a` | archive the selected session now (see below) |
 | `f` | pin / unpin: keep a session in the Pinned section at the top |
@@ -60,12 +60,11 @@ to their own cmux tab instead. Without cmux, the board tells you the `claude att
 (● needs you, ◆ working, ◇ idle, ✓ done), folders that need you come first, and the sessions inside
 stay sorted by urgency. `g` again goes back to grouping by status.
 
-**New session here.** `c` asks what the new session should do and starts it as a background
-session (`claude --bg "<task>"`) in the folder of the selected session. It shows up on the board like
-any other session, and in cmux it opens on the right so you can watch it start. Leave the task empty
-and press `⏎` to start it idle: it opens on the right with the cursor in it, ready for its first
-prompt. Either way it is a background session, so closing or replacing the side pane never ends it.
-A folder Claude Code doesn't trust yet answers with its trust message: run `claude` there once.
+**New session here.** `c` starts a session in the folder of the selected session, straight away: an
+idle background session (`claude --bg`) that opens beside the board with the cursor in it, so you
+type its first prompt there. It shows on the board like any other session, and closing or replacing
+its column never ends it. A folder Claude Code doesn't trust yet answers with its trust message: run
+`claude` there once.
 
 **Pinned.** `f` pins the selected session: it moves into a ★ Pinned section at the top of the
 board, in folder and status view alike, with its folder named on the row, and keeps its live state

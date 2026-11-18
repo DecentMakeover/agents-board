@@ -689,8 +689,6 @@ class Board(App[None]):
     #top {{ height: 3; padding: 1 2 0 2; background: {BG}; }}
     #filter {{ dock: top; display: none; margin: 0 2; border: tall {LINE}; background: {PANEL}; }}
     #filter.on {{ display: block; }}
-    #newtask {{ dock: top; display: none; margin: 0 2; border: tall {ACCENT}; background: {PANEL}; }}
-    #newtask.on {{ display: block; }}
     #body {{ height: 1fr; }}
     #list {{
         width: 3fr; background: {BG}; border: none; padding: 0 1 0 2;
@@ -751,13 +749,11 @@ class Board(App[None]):
         self._pins: set[str] = set()
         self.cursor_key = ""
         self.show_info = bool(_prefs().get("show_info"))
-        self.new_cwd = ""
 
     # layout
     def compose(self) -> ComposeResult:
         yield Static(id="top")
         yield Input(placeholder="filter by name, folder or question…  (esc clears)", id="filter")
-        yield Input(id="newtask")
         with Horizontal(id="body"):
             yield OptionList(id="list")
             with VerticalScroll(id="side"):
@@ -1267,7 +1263,7 @@ class Board(App[None]):
     def action_keys(self) -> None:
         self.notify(
             "⏎ open beside the board   space peek   x close sessions\n"
-            "c new session here   a archive   f pin · unpin\n"
+            "c new session here (opens beside the board)   a archive   f pin · unpin\n"
             "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"
             "p parked   d all done   n alerts   r refresh   q quit",
@@ -1283,26 +1279,14 @@ class Board(App[None]):
         self.render_list()
 
     def action_new_session(self) -> None:
+        """Start an idle background session in the selected session's folder, straight away,
+        and open it beside the board with the cursor in it: type its first prompt there."""
         r = self.current()
         if r is None or not r.cwd:
             self.notify("Pick a session first: the new one starts in its folder", timeout=3)
             return
-        self.new_cwd = r.cwd
-        box = self.query_one("#newtask", Input)
-        where = r.cwd.replace(str(HOME), "~")
-        box.placeholder = f"new session in {where}: what should it do?  ⏎ starts it  ·  empty ⏎ starts it idle  ·  esc cancels"
-        box.value = ""
-        box.add_class("on")
-        box.focus()
-
-    @on(Input.Submitted, "#newtask")
-    def _newtask(self, e: Input.Submitted) -> None:
-        task = e.value.strip()
-        box = self.query_one("#newtask", Input)
-        box.remove_class("on")
-        box.value = ""
-        self.query_one("#list", OptionList).focus()
-        self.run_new_session(self.new_cwd, task)
+        self.notify(f"Starting a session in {short_folder(r.cwd)}…", timeout=2)
+        self.run_new_session(r.cwd, "")
 
     @work(thread=True, group="new")
     def run_new_session(self, cwd: str, task: str) -> None:
@@ -1322,12 +1306,6 @@ class Board(App[None]):
         self.call_from_thread(self.notify, msg, timeout=5)
 
     def action_cancel_input(self) -> None:
-        box = self.query_one("#newtask", Input)
-        if box.has_class("on"):
-            box.remove_class("on")
-            box.value = ""
-            self.query_one("#list", OptionList).focus()
-            return
         self.action_clear_filter()
 
     def action_filter(self) -> None:
