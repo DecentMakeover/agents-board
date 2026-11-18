@@ -713,7 +713,7 @@ class Board(App[None]):
         Binding("enter", "jump", "open", priority=False),
         Binding("c", "new_session", "new"),
         Binding("a", "archive", "archive"),
-        Binding("f", "pin", "pin"),
+        Binding("f", "pin", "pin/unpin"),
         Binding("slash", "filter", "filter"),
         Binding("question_mark", "keys", "keys"),
         Binding("space", "peek", "peek", show=False),
