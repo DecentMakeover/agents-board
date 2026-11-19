@@ -37,7 +37,7 @@ Keys on the full-screen board:
 | `g` | group by folder instead of by status (remembered) |
 | `c` | start a new session in the selected session's folder, opened beside the board |
 | `/` | filter by name, folder or question; `esc` clears |
-| `a` | archive the selected session now (see below) |
+| `a` / `z` | archive the selected session / undo the last archive (see below) |
 | `f` | pin / unpin: keep a session in the Pinned section at the top |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
@@ -72,11 +72,14 @@ and timer there. Pins are kept by session id in `~/.claude/agents-board/pins.jso
 restarts and resumes, and a pinned session stays listed even once it is finished or parked. `f` again
 unpins it; archiving it drops the pin.
 
-**Archive.** `a` archives the selected session at once: its transcript (and session files) are
-copied to `~/.claude/session-archive/<sessionId>/`, safe from the 30-day transcript cleanup, and the
-session is removed from `claude agents`. A background session that is done, failed, stopped or
-waiting for input can be archived; a running process is stopped first. The format matches the
-session-archive mod, so `/unarchive <id>` there brings it back idle under the same id.
+**Archive.** `a` archives the selected session: it leaves the board at once, and for 8 seconds `z`
+takes it back untouched (still running, same state). After that it is archived for real: its
+transcript (and session files) are copied to `~/.claude/session-archive/<sessionId>/`, safe from the
+30-day transcript cleanup, and the session is removed from `claude agents`; `z` still restores the most
+recent one (idle, same id and name, its pin back). A background session that is done, failed, stopped
+or waiting for input can be archived; a running process is stopped first. The format matches the
+session-archive mod, so `/unarchive <id>` there works too. Archives still waiting when the board
+closes are carried out first.
 
 **Alerts.** When a session newly needs you or looks stuck, the board shows a toast, rings the
 terminal bell and, in cmux, sends a cmux notification.

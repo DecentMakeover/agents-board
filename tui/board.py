@@ -495,6 +495,38 @@ def archive_session(row: Row) -> tuple[bool, str]:
     return True, f"Archived {row.name}  ·  /unarchive {row.id} brings it back"
 
 
+def restore_session(session_id: str) -> tuple[bool, str]:
+    """Undo an archive the way the session-archive mod's /unarchive does: put the transcript
+    back if it is gone, `claude --bg --resume` it (idle, same id and name), mark meta.json."""
+    dest = ARCHIVE / session_id
+    meta = _read_json(dest / "meta.json")
+    if not meta:
+        return False, "nothing archived to restore"
+    name, cwd = _s(meta.get("name")), _s(meta.get("cwd"))
+    tp = Path(_s(meta.get("transcriptPath")))
+    if meta.get("hasTranscript") and _s(meta.get("transcriptPath")) and not tp.exists():
+        try:
+            tp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(dest / "transcript.jsonl", tp)
+            if (dest / "transcript-files").is_dir():
+                shutil.copytree(dest / "transcript-files", tp.with_suffix(""), dirs_exist_ok=True)
+        except OSError as err:
+            return False, f"{name}: could not put its transcript back ({err})"
+    if not cwd or not Path(cwd).is_dir():
+        return False, f"{name}: its folder {cwd} is gone"
+    named = ["--name", name] if name and name != _s(meta.get("id")) else []
+    out = subprocess.run(["claude", "--bg", "--resume", session_id, *named], cwd=cwd, capture_output=True,
+                         text=True, timeout=60, stdin=subprocess.DEVNULL)
+    if out.returncode != 0:
+        return False, f"{name}: resume failed: {(out.stderr or out.stdout).strip()[:120]}"
+    meta["restoredAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    return True, f"Restored {name} (idle, waiting for your next message)"
+
+
+UNDO_SECONDS = 8
+
+
 def _prefs() -> dict[str, Any]:
     return _read_json(STATE / "prefs.json")
 
@@ -717,6 +749,7 @@ class Board(App[None]):
         Binding("c", "new_session", "new"),
         Binding("a", "archive", "archive"),
         Binding("f", "pin", "pin/unpin"),
+        Binding("z", "undo_archive", "undo archive", show=False),
         Binding("slash", "filter", "filter"),
         Binding("question_mark", "keys", "keys"),
         Binding("space", "peek", "peek", show=False),
@@ -748,6 +781,9 @@ class Board(App[None]):
         self.shown: list[Row] = []
         self.side = SideViewer()
         self.restart = False
+        # Archives wait UNDO_SECONDS before they happen, so z can take one back untouched.
+        self.pending_archive: dict[str, tuple[Row, Any, bool]] = {}   # key -> (row, timer, was pinned)
+        self.archived: list[tuple[str, bool]] = []                    # (session id, was pinned), newest last
         self.testing = False
         self.rejected_mtime = 0.0
         self.by_folder = bool(_prefs().get("by_folder"))
@@ -871,7 +907,7 @@ class Board(App[None]):
         q = self.query_text.lower()
         out = []
         for r in self.rows:
-            if hidden.get(r.key) == r.stamp:
+            if hidden.get(r.key) == r.stamp or r.key in self.pending_archive:
                 continue
             if q and q not in f"{r.name} {r.cwd} {r.note}".lower():
                 continue
@@ -1195,24 +1231,79 @@ class Board(App[None]):
         if DEMO:
             self.notify(f"demo mode · this would archive {r.name}", timeout=3)
             return
-        self.run_archive(r)
+        if r.kind != "bg" or not r.id:
+            self.notify(f"{r.name} is an interactive tab: close its tab to end it", severity="warning", timeout=4)
+            return
+        if r.state not in ARCHIVABLE:
+            self.notify(f"{r.name} is still {r.state or 'running'}: let it finish or stop it first", severity="warning", timeout=4)
+            return
+        # Gone from the list now; archived for real in a few seconds unless z takes it back.
+        timer = self.set_timer(UNDO_SECONDS, lambda key=r.key: self.commit_archive(key))
+        self.pending_archive[r.key] = (r, timer, self.is_pinned(r))
+        self.notify(f"Archived {r.name}  ·  z to undo", timeout=UNDO_SECONDS)
+        self.render_list()
+
+    def commit_archive(self, key: str) -> None:
+        item = self.pending_archive.get(key)
+        if item is not None:
+            self.run_archive(item[0], item[2])
 
     @work(thread=True, group="archive")
-    def run_archive(self, r: Row) -> None:
+    def run_archive(self, r: Row, was_pinned: bool) -> None:
         ok, msg = archive_session(r)
-        if ok:
-            pins = _marks("pins")
-            if pins.pop(r.session_id or r.key, None) is not None:
-                _save_marks("pins", pins)
-            self.side.drop(r.key)
 
-            def drop() -> None:
+        def settle() -> None:
+            self.pending_archive.pop(r.key, None)
+            if ok:
+                pins = _marks("pins")
+                if pins.pop(r.session_id or r.key, None) is not None:
+                    _save_marks("pins", pins)
+                self.archived.append((r.session_id, was_pinned))
                 self.rows = [x for x in self.rows if x.key != r.key]
-                self.render_list()
+            else:
+                self.notify(msg, severity="warning", timeout=6)
+            self.render_list()
 
-            self.call_from_thread(drop)
-            self.call_from_thread(self.load)
-        self.call_from_thread(self.notify, msg, severity="information" if ok else "warning", timeout=5)
+        if ok:
+            self.side.drop(r.key)
+        self.call_from_thread(settle)
+        self.call_from_thread(self.load)
+
+    def action_undo_archive(self) -> None:
+        # Still waiting: cancel it, and the session is back exactly as it was.
+        if self.pending_archive:
+            key = list(self.pending_archive)[-1]
+            r, timer, _ = self.pending_archive.pop(key)
+            timer.stop()
+            self.notify(f"Kept {r.name}", timeout=3)
+            self.render_list()
+            return
+        if not self.archived:
+            self.notify("Nothing archived from this board to undo", timeout=3)
+            return
+        sid, was_pinned = self.archived.pop()
+        self.run_restore(sid, was_pinned)
+
+    @work(thread=True, group="archive")
+    def run_restore(self, session_id: str, was_pinned: bool) -> None:
+        ok, msg = restore_session(session_id)
+        if ok and was_pinned:
+            pins = _marks("pins")
+            pins[session_id] = time.time()
+            _save_marks("pins", pins)
+        self.call_from_thread(self.notify, msg, severity="information" if ok else "warning", timeout=6)
+        self.call_from_thread(self.load)
+
+    def finish_pending_archives(self) -> None:
+        """Closing or updating the board: carry out the archives still waiting."""
+        for r, timer, was_pinned in list(self.pending_archive.values()):
+            timer.stop()
+            ok, _ = archive_session(r)
+            if ok:
+                pins = _marks("pins")
+                if pins.pop(r.session_id or r.key, None) is not None:
+                    _save_marks("pins", pins)
+        self.pending_archive.clear()
 
     def action_hide(self) -> None:
         r = self.current()
@@ -1269,7 +1360,7 @@ class Board(App[None]):
     def action_keys(self) -> None:
         self.notify(
             "⏎ open beside the board   space peek   x close sessions\n"
-            "c new session here (opens beside the board)   a archive   f pin · unpin\n"
+            "c new session here (opens beside the board)   a archive · z undo   f pin · unpin\n"
             "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"
             "p parked   d all done   n alerts   r refresh   q quit",
@@ -1356,6 +1447,7 @@ if __name__ == "__main__":
         sys.exit(0)
     app = Board()
     app.run()
+    app.finish_pending_archives()
     if app.restart:
         os.environ["AGENTS_BOARD_UPDATED"] = "1"
         os.execv(sys.executable, [sys.executable, str(SELF), *sys.argv[1:]])
