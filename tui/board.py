@@ -46,7 +46,8 @@ STATE = CLAUDE / "agents-board"
 STUCK_MS = 15 * 60_000
 PARK_MS = 2 * 86_400_000
 DONE_SHOWN = 8
-DEMO = "--demo" in sys.argv[1:]
+SELFTEST = "--selftest" in sys.argv[1:]
+DEMO = "--demo" in sys.argv[1:] or SELFTEST
 SELF = Path(__file__).resolve()
 SELF_MTIME = SELF.stat().st_mtime
 
@@ -54,6 +55,7 @@ SELF_MTIME = SELF.stat().st_mtime
 BG = "#0d1017"
 PANEL = "#131821"
 LINE = "#222937"
+BAND = "#182030"     # header bands: a folder / section starts here
 TEXT = "#e3e8f1"
 SOFT = "#a3adbf"
 DIM = "#6c7689"
@@ -66,6 +68,7 @@ TEAL = "#5fe3c0"
 SLATE = "#8c95a8"
 AMBER_SOFT = "#9c8247"   # needs you, but its process has exited ("asleep")
 RED_SOFT = "#a35a5a"
+BLUE = "#7f9cc9"     # done: its own calm colour, not faded out
 
 GROUPS: dict[str, dict[str, str]] = {
     "needs": {"title": "NEEDS YOU", "color": AMBER, "glyph": "●", "chip": "need you"},
@@ -326,8 +329,8 @@ def state_look(r: Row) -> tuple[str, str]:
         return "needs you", AMBER if live else AMBER_SOFT
     if r.group == "stuck":
         return "stuck", RED if live else RED_SOFT
-    return {"working": ("working", TEAL), "idle": ("idle", SLATE), "done": ("done", FAINT),
-            "parked": ("parked", FAINT)}[r.group]
+    return {"working": ("working", TEAL), "idle": ("idle", SLATE), "done": ("done", BLUE),
+            "parked": ("parked", DIM)}[r.group]
 
 
 def short_folder(cwd: str) -> str:
@@ -745,6 +748,8 @@ class Board(App[None]):
         self.shown: list[Row] = []
         self.side = SideViewer()
         self.restart = False
+        self.testing = False
+        self.rejected_mtime = 0.0
         self.by_folder = bool(_prefs().get("by_folder"))
         self._pins: set[str] = set()
         self.cursor_key = ""
@@ -772,7 +777,8 @@ class Board(App[None]):
             self.notify("Board updated to the latest version", timeout=6)
 
     def check_update(self) -> None:
-        """Heartbeat for /board, and a newer board.py on disk (an update): restart into it."""
+        """Heartbeat for /board, and a newer board.py on disk (an update): restart into it,
+        but only once the new version has passed its self-test."""
         ws = os.environ.get("CMUX_WORKSPACE_ID", "")
         if ws and not DEMO:
             try:
@@ -781,15 +787,31 @@ class Board(App[None]):
             except OSError:
                 pass
         try:
-            changed = SELF.stat().st_mtime != SELF_MTIME
-            # Restart only into a file that compiles: a half-saved edit keeps the running board.
-            if changed:
-                compile(SELF.read_text(), str(SELF), "exec")
-        except (OSError, SyntaxError, ValueError):
+            mtime = SELF.stat().st_mtime
+        except OSError:
             return
-        if changed:
+        if mtime != SELF_MTIME and mtime != self.rejected_mtime and not self.testing:
+            self.testing = True
+            self.try_update(mtime)
+
+    @work(thread=True, exclusive=True, group="update")
+    def try_update(self, mtime: float) -> None:
+        # Draw the new version headlessly first: one that fails stays out of the way.
+        try:
+            out = subprocess.run([sys.executable, str(SELF), "--selftest"], capture_output=True,
+                                 text=True, timeout=90)
+            ok = out.returncode == 0
+            why = (out.stderr or out.stdout).strip().splitlines()[-1:] if not ok else []
+        except Exception as err:  # a hung or missing interpreter counts as a failure
+            ok, why = False, [str(err)]
+        self.testing = False
+        if ok and SELF.stat().st_mtime == mtime:
             self.restart = True
-            self.exit()
+            self.call_from_thread(self.exit)
+        elif not ok:
+            self.rejected_mtime = mtime
+            self.call_from_thread(self.notify, f"Update skipped: the new version failed its self-test ({(why or ['?'])[0][:80]})",
+                                  severity="warning", timeout=8)
 
     def on_resize(self) -> None:
         # The detail panel is off by default (the session columns sit beside the board);
@@ -869,82 +891,66 @@ class Board(App[None]):
         return (r.session_id or r.key) in self._pins
 
     def pinned_header_prompt(self, count: int) -> Table:
+        label = Text("★ Pinned", style=f"bold {ACCENT}")
+        return self._band(label, Text(f"{count}", style=SOFT))
+
+    def _band(self, left: Text, right: Text) -> RGroup:
+        """A section's header: a tinted full-width band with a rule under it, so it is
+        plain where one folder ends and the next begins."""
         grid = Table.grid(expand=True, padding=(0, 1))
         grid.add_column(no_wrap=True)
-        grid.add_column(ratio=1)
-        label = Text("★ ", style=f"bold {ACCENT}")
-        label.append("PINNED", style=f"bold {ACCENT}")
-        label.append(f"  {count}", style=FAINT)
-        grid.add_row(label, Rule(style=LINE))
-        return grid
+        grid.add_column(ratio=1, justify="right", no_wrap=True)
+        grid.add_row(left, right)
+        return RGroup(Padding(grid, (0, 0), style=f"on {BAND}", expand=True), Rule(style=LINE, characters="─"))
 
     def _row_prompt(self, r: Row, now: float, show_folder: bool) -> Table:
-        """bar · name · state · age, on one line. A second line (what it asks, or what it is
-        doing) only where it matters: sessions that want you, and the row under the cursor."""
+        """name · state · age on one line, the same type for every state: only the state word
+        carries colour. The row under the cursor also shows what it asks or is doing."""
         ms = now - r.since
         word, color = state_look(r)
-        attention = r.group in ("needs", "stuck")
-        expanded = attention or self.cursor_key == r.key
         grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(width=1, no_wrap=True)
         grid.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
         grid.add_column(width=9, justify="right", no_wrap=True)
         grid.add_column(width=4, justify="right", no_wrap=True)
-        bar = Text("▍", style=color)
-        name_style = f"bold {TEXT}" if attention else TEXT if r.group == "working" else SOFT if r.group == "idle" else DIM
-        name = Text(r.name, style=name_style)
+        name = Text(r.name, style=TEXT)
         if show_folder:
             name.append(f"   {short_folder(r.cwd)}", style=FAINT)
         if r.kind == "tab":
             name.append("   tab", style=ACCENT)
-        timer_style = f"bold {urgency(r, ms)}" if attention and r.pid else FAINT if r.group in ("done", "parked") else DIM
-        grid.add_row(bar, name, Text(word, style=f"bold {color}" if attention else color),
-                     Text(short_age(ms), style=timer_style))
-        if expanded:
+        grid.add_row(name, Text(word, style=color), Text(short_age(ms), style=DIM))
+        if self.cursor_key == r.key and r.note:
             note = r.note
-            if r.reply and attention:
+            if r.reply and r.group in ("needs", "stuck"):
                 note = f"{note}  →  {r.reply}"
-            grid.add_row(Text("▍", style=color) if attention else "", Text(note, style=DIM, overflow="ellipsis", no_wrap=True), "", "")
-        if attention:
-            # A two-line row gets a line of air below it, so questions don't run together.
-            grid.add_row("", "", "", "")
+            grid.add_row(Text(f"  {note}", style=DIM, overflow="ellipsis", no_wrap=True), "", "")
         return grid
 
     def header_prompt(self, group: str, count: int) -> Table:
         g = GROUPS[group]
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(no_wrap=True)
-        grid.add_column(ratio=1)
-        label = Text(g["title"], style=f"bold {g['color']}")
-        label.append(f"  {count}", style=DIM)
-        grid.add_row(label, Rule(style=LINE))
-        return grid
+        return self._band(Text(g["title"].title(), style=f"bold {g['color']}"), Text(f"{count}", style=SOFT))
 
     def _gap(self, options: list[Option]) -> int:
-        """A header's top margin: none when the row above already left a line of air."""
-        if not options or not (options[-1].id or "").startswith("row:"):
-            return 1
-        key = (options[-1].id or "")[4:]
-        r = next((x for x in self.shown if x.key == key), None)
-        return 0 if r is not None and r.group in ("needs", "stuck") else 1
+        """Air above a section: two lines between sections, one at the very top."""
+        return 2 if options else 1
 
     def folder_header_prompt(self, cwd: str, members: list[Row]) -> Table:
-        grid = Table.grid(expand=True, padding=(0, 1))
-        grid.add_column(no_wrap=True)
-        grid.add_column(ratio=1)
         where = short_folder(cwd) or "?"
         head, _, leaf = where.rpartition("/")
-        label = Text(f"{head}/" if head else "", style=FAINT)
-        label.append(leaf, style=f"bold {TEXT}")
+        left = Text(leaf, style=f"bold {TEXT}")
+        if head:
+            left.append(f"   {head}/", style=FAINT)
         words = {"needs": "need you", "stuck": "stuck", "working": "working", "idle": "idle", "done": "done", "parked": "parked"}
+        right = Text()
         for g in ORDER:
             n = sum(1 for r in members if r.group == g)
             if n:
-                label.append("    ")
-                label.append(str(n), style=f"bold {GROUPS[g]['color']}" if g in ("needs", "stuck", "working") else FAINT)
-                label.append(f" {words[g]}", style=FAINT)
-        grid.add_row(label, Rule(style=LINE))
-        return grid
+                if right.plain:
+                    right.append("   ")
+                word, color = {"needs": (words[g], AMBER), "stuck": (words[g], RED), "working": (words[g], TEAL),
+                               "idle": (words[g], SLATE), "done": (words[g], BLUE), "parked": (words[g], DIM)}[g]
+                right.append(f"{n} ", style=f"bold {color}")
+                right.append(word, style=SOFT)
+        return self._band(left, right)
 
     def folder_options(self, rows: list[Row], now: float, before: list[Option] | None = None) -> list[Option]:
         """Sessions grouped by folder: folders that need you first, then the most recently active."""
@@ -1322,7 +1328,32 @@ class Board(App[None]):
         self.render_list()
 
 
+async def _selftest() -> None:
+    """Draw the board headlessly on demo sessions, both views and a pinned row; raise on error."""
+    app = Board()
+    async with app.run_test(size=(100, 40)) as pilot:
+        for _ in range(40):
+            await pilot.pause(0.1)
+            if app.rows:
+                break
+        assert app.rows, "no rows loaded"
+        first = app.rows[0]
+        app.pins = lambda: {first.session_id or first.key}  # type: ignore[method-assign]
+        for by_folder in (False, True):
+            app.by_folder = by_folder
+            app.render_list()
+            app.tick()
+            app.render_top()
+            app.render_detail()
+            await pilot.pause(0.1)
+        assert app.shown, "nothing drawn"
+
+
 if __name__ == "__main__":
+    if SELFTEST:
+        import asyncio
+        asyncio.run(_selftest())
+        sys.exit(0)
     app = Board()
     app.run()
     if app.restart:

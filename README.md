@@ -94,11 +94,12 @@ terminal bell and, in cmux, sends a cmux notification.
 
 Within Needs you and Stuck, running sessions come first, then the longest-waiting.
 
-Every row is one line: a coloured bar and the state in words on the right (**needs you**, **failed**,
-**stuck** in amber or red, **working** in green, **idle** and **done** in grey), with a one-unit age
-(now · 12m · 5h · 3d). Sessions that want you get a second line with what they ask, and so does the
-row under the cursor. A session that needs you but whose process has exited is drawn in a softer
-colour. The footer lists the everyday keys; `?` lists them all.
+Every row is one line in the same type, whatever its state: the name, then the state in its colour
+(**needs you** amber, **stuck** / **failed** red, **working** green, **idle** grey, **done** blue) and
+a one-unit age (now · 12m · 5h · 3d). The row under the cursor also shows what it asks or is doing.
+Each folder starts with a tinted header band (name and counts) and a rule, with space above it. A
+session that needs you but whose process has exited is drawn in a softer amber. The footer lists the
+everyday keys; `?` lists them all.
 
 ## Requirements
 
@@ -130,7 +131,11 @@ can change them and break the sorting until this is updated. Issues and PRs are 
 claude plugin validate .      # what the engine will load
 claude plugin test .          # tests/*.test.tsx against the engine
 uv run --script tui/board.py --demo
+uv run --script tui/board.py --selftest   # draws both views headlessly; exit 0 = good
 ```
+
+A running board restarts itself into a newer `board.py` only after that file passes `--selftest`, so a
+broken edit never takes the board down.
 
 The sorting rules live twice, kept in step: `hooks/classify.ts` (the mod) and `classify()` in
 `tui/board.py` (the full-screen board).
