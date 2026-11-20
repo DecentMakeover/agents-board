@@ -677,8 +677,11 @@ class SideViewer:
             self.slots.append(slot)
             self._layout()
         else:
-            # Both columns busy: the least recently used one gets this session.
-            slot = min(self.slots, key=lambda sl: sl.get("used", 0))
+            # Both columns busy: the least recently used one that isn't held gets this session.
+            free = [sl for sl in self.slots if not sl.get("held")]
+            if not free:
+                return "Both columns are held: press l on one of them to release it"
+            slot = min(free, key=lambda sl: sl.get("used", 0))
             made = _cmux("new-surface", "--pane", slot["pane"], "--workspace", self.workspace,
                          "--command", command, "--focus", flag)
             if made.returncode != 0:
@@ -691,6 +694,30 @@ class SideViewer:
             _cmux("focus-panel", "--panel", slot["surface"], "--workspace", self.workspace)
         self._save()
         return f"{label} opened in column {self.slots.index(slot) + 1} of {len(self.slots)}"
+
+    def slot_of(self, key: str) -> dict[str, Any] | None:
+        return next((sl for sl in self.slots if sl.get("key") == key), None)
+
+    def hold(self, row: Row) -> str:
+        """Toggle holding the column that shows `row`: a held column is never replaced by
+        another session. A session not open yet is opened (without leaving the board) and held."""
+        self._prune()
+        slot = self.slot_of(row.key)
+        if slot is not None:
+            slot["held"] = not slot.get("held")
+            self._save()
+            n = self.slots.index(slot) + 1
+            return (f"Holding {row.name} in column {n}: other sessions use the other column"
+                    if slot["held"] else f"Released column {n}: it takes new sessions again")
+        if not row.id:
+            return f"{row.name} is an interactive tab: it can't be opened in a column"
+        msg = self.show(row, focus=False)
+        slot = self.slot_of(row.key)
+        if slot is None:
+            return msg
+        slot["held"] = True
+        self._save()
+        return f"Opened and holding {row.name} in column {self.slots.index(slot) + 1}"
 
     def drop(self, key: str) -> None:
         """Close the slot showing `key` (its session was archived)."""
@@ -750,6 +777,7 @@ class Board(App[None]):
         Binding("a", "archive", "archive"),
         Binding("f", "pin", "pin/unpin"),
         Binding("z", "undo_archive", "undo archive", show=False),
+        Binding("l", "hold", "hold column", show=False),
         Binding("slash", "filter", "filter"),
         Binding("question_mark", "keys", "keys"),
         Binding("space", "peek", "peek", show=False),
@@ -953,6 +981,9 @@ class Board(App[None]):
             name.append(f"   {short_folder(r.cwd)}", style=FAINT)
         if r.kind == "tab":
             name.append("   tab", style=ACCENT)
+        slot = self.side.slot_of(r.key) if self.side.available else None
+        if slot is not None:
+            name.append("   ◨ held" if slot.get("held") else "   ◨ open", style=f"bold {ACCENT}" if slot.get("held") else FAINT)
         grid.add_row(name, Text(word, style=color), Text(short_age(ms), style=DIM))
         if self.cursor_key == r.key and r.note:
             note = r.note
@@ -1218,6 +1249,7 @@ class Board(App[None]):
         # can't be attached elsewhere, so that one still switches to its own tab.
         msg = self.side.show(r, focus) if self.opens_on_side(r) else jump(r)
         self.call_from_thread(self.notify, msg, timeout=3)
+        self.call_from_thread(self.tick)
 
     @work(thread=True, exclusive=True, group="jump")
     def run_close_side(self) -> None:
@@ -1268,6 +1300,21 @@ class Board(App[None]):
             self.side.drop(r.key)
         self.call_from_thread(settle)
         self.call_from_thread(self.load)
+
+    def action_hold(self) -> None:
+        r = self.current()
+        if r is None:
+            return
+        if not self.side.available:
+            self.notify("Holding a column needs the board running in cmux", timeout=3)
+            return
+        self.run_hold(r)
+
+    @work(thread=True, exclusive=True, group="jump")
+    def run_hold(self, r: Row) -> None:
+        msg = self.side.hold(r)
+        self.call_from_thread(self.notify, msg, timeout=4)
+        self.call_from_thread(self.tick)
 
     def action_undo_archive(self) -> None:
         # Still waiting: cancel it, and the session is back exactly as it was.
@@ -1359,7 +1406,7 @@ class Board(App[None]):
 
     def action_keys(self) -> None:
         self.notify(
-            "⏎ open beside the board   space peek   x close sessions\n"
+            "⏎ open beside the board   space peek   l hold / release a column   x close sessions\n"
             "c new session here (opens beside the board)   a archive · z undo   f pin · unpin\n"
             "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"

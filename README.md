@@ -32,6 +32,7 @@ Keys on the full-screen board:
 | `↑` `↓` / `j` `k` | move between sessions |
 | `⏎` / click | open that session in a column beside the board and type into it (see below) |
 | `space` | peek: open it in a column but stay on the board |
+| `l` | hold / release the column a session is in: a held column is never replaced |
 | `x` | close the session columns (the sessions keep running) |
 | `i` | show the info panel: full question, suggested reply, original ask (remembered) |
 | `g` | group by folder instead of by status (remembered) |
@@ -49,7 +50,10 @@ Keys on the full-screen board:
 column beside the board (`claude attach <id>`), ready for your reply. A second session opens a second
 column: board | session | session, the board at about a third. A third session replaces whichever
 column you used least recently, so the two you are working with stay up; a session already open is
-just focused. `space` does the same without leaving the board, `x` closes the columns. Closing or
+just focused. `space` does the same without leaving the board, `x` closes the columns. `l` holds the column a
+session is in (opening it first if needed): other sessions then only use the other column, so one
+task can stay in view while you work through the rest; `l` on it again releases it. Rows open in a
+column are tagged ◨ open, the held one ◨ held. Closing or
 replacing a column only detaches: the session keeps running. A session marked *asleep* (its process
 has exited) resumes when attached.
 
