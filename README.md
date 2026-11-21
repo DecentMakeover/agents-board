@@ -57,8 +57,10 @@ column are tagged ◨ open, the held one ◨ held. Closing or
 replacing a column only detaches: the session keeps running. A session marked *asleep* (its process
 has exited) resumes when attached.
 
-Interactive sessions (the ones marked `tab`) can't be attached in a second place, so `⏎` switches
-to their own cmux tab instead. Without cmux, the board tells you the `claude attach <id>` to run.
+Interactive sessions (the ones marked `tab`) open in a column too: their own cmux tab is *moved* into
+the column (a session can't run in two places), and when the column is replaced, released or closed
+the tab goes back to its own workspace, still running. Without cmux, the board tells you the
+`claude attach <id>` to run.
 
 **By folder.** `g` regroups the board by folder: each folder gets a header with its counts
 (● needs you, ◆ working, ◇ idle, ✓ done), folders that need you come first, and the sessions inside

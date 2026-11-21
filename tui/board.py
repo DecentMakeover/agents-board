@@ -686,14 +686,85 @@ class SideViewer:
                          "--command", command, "--focus", flag)
             if made.returncode != 0:
                 return f"cmux: {made.stderr.strip()[:120]}"
-            old = slot.get("surface", "")
-            slot.update(surface=made.stdout.split()[1] if len(made.stdout.split()) > 1 else "", key=key, used=now)
-            if old:
-                _cmux("close-surface", "--surface", old, "--workspace", self.workspace, "--force")
+            old = dict(slot)
+            slot.clear()
+            slot.update(pane=old["pane"], surface=made.stdout.split()[1] if len(made.stdout.split()) > 1 else "",
+                        key=key, used=now)
+            self._evict(old)
         if focus and slot.get("surface"):
             _cmux("focus-panel", "--panel", slot["surface"], "--workspace", self.workspace)
         self._save()
         return f"{label} opened in column {self.slots.index(slot) + 1} of {len(self.slots)}"
+
+    def _evict(self, slot: dict[str, Any]) -> None:
+        """Take a session out of its column without ending it: an attached view is closed (the
+        session keeps running); an interactive tab moved here goes back to its own workspace."""
+        surface = slot.get("surface", "")
+        if not surface:
+            return
+        if slot.get("kind") == "moved":
+            back = _cmux("move-surface", "--surface", surface, "--workspace", slot.get("home", ""), "--focus", "false")
+            if back.returncode != 0:
+                _cmux("move-tab-to-new-workspace", "--surface", surface, "--workspace", self.workspace,
+                      "--title", slot.get("label", "claude"), "--focus", "false")
+        else:
+            _cmux("close-surface", "--surface", surface, "--workspace", self.workspace, "--force")
+
+    def show_tab(self, row: Row, focus: bool) -> str | None:
+        """Bring an interactive session's own cmux tab into a column (moved, not copied: the
+        session can't run twice). None when cmux doesn't know where that tab is."""
+        sessions = _read_json(HOME / ".cmuxterm" / "claude-hook-sessions.json").get("sessions") or {}
+        own = sessions.get(row.session_id) or {}
+        tab, home = _s(own.get("surfaceId")), _s(own.get("workspaceId"))
+        if not tab or not row.pid or own.get("pid") != row.pid:
+            return None
+        self._prune()
+        now = time.time()
+        hit = self.slot_of(row.key)
+        if hit is not None and hit.get("surface"):
+            hit["used"] = now
+            if focus:
+                _cmux("focus-panel", "--panel", hit["surface"], "--workspace", self.workspace)
+            self._save()
+            return f"{row.name} is already open"
+        if home == self.workspace:
+            home = ""  # it already lives in the board's workspace: send it to a tab of its own later
+        flag = "true" if focus else "false"
+        if len(self.slots) < SLOTS:
+            parent = self.slots[-1]["surface"] if self.slots else self.board_surface
+            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", parent, "--focus", "false")
+            if made.returncode != 0:
+                return f"cmux: {made.stderr.strip()[:120]}"
+            placeholder = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
+            pane = self._pane_of(placeholder, tries=8)
+            moved = _cmux("move-surface", "--surface", tab, "--pane", pane, "--workspace", self.workspace, "--focus", flag)
+            _cmux("close-surface", "--surface", placeholder, "--workspace", self.workspace, "--force")
+            if moved.returncode != 0:
+                return f"cmux could not move {row.name}: {moved.stderr.strip()[:100]}"
+            slot: dict[str, Any] = {"pane": pane, "surface": tab, "key": row.key, "used": now,
+                                    "kind": "moved", "home": home, "label": row.name}
+            self.slots.append(slot)
+            self._layout()
+        else:
+            free = [sl for sl in self.slots if not sl.get("held")]
+            if not free:
+                return "Both columns are held: press l on one of them to release it"
+            slot = min(free, key=lambda sl: sl.get("used", 0))
+            moved = _cmux("move-surface", "--surface", tab, "--pane", slot["pane"], "--workspace", self.workspace, "--focus", flag)
+            if moved.returncode != 0:
+                return f"cmux could not move {row.name}: {moved.stderr.strip()[:100]}"
+            old = dict(slot)
+            slot.clear()
+            slot.update(pane=old["pane"], surface=tab, key=row.key, used=now, kind="moved", home=home, label=row.name)
+            self._evict(old)
+        if focus:
+            _cmux("focus-panel", "--panel", tab, "--workspace", self.workspace)
+        self._save()
+        return f"{row.name} moved into column {self.slots.index(slot) + 1} (it goes back to its tab when replaced)"
+
+    def open_row(self, row: Row, focus: bool) -> str | None:
+        """Open any session in a column: attach a background one, move an interactive tab."""
+        return self.show(row, focus) if row.kind == "bg" and row.id else self.show_tab(row, focus)
 
     def slot_of(self, key: str) -> dict[str, Any] | None:
         return next((sl for sl in self.slots if sl.get("key") == key), None)
@@ -709,9 +780,9 @@ class SideViewer:
             n = self.slots.index(slot) + 1
             return (f"Holding {row.name} in column {n}: other sessions use the other column"
                     if slot["held"] else f"Released column {n}: it takes new sessions again")
-        if not row.id:
-            return f"{row.name} is an interactive tab: it can't be opened in a column"
-        msg = self.show(row, focus=False)
+        msg = self.open_row(row, focus=False)
+        if msg is None:
+            return f"{row.name}: cmux doesn't know which tab it runs in, so it can't be moved into a column"
         slot = self.slot_of(row.key)
         if slot is None:
             return msg
@@ -720,11 +791,10 @@ class SideViewer:
         return f"Opened and holding {row.name} in column {self.slots.index(slot) + 1}"
 
     def drop(self, key: str) -> None:
-        """Close the slot showing `key` (its session was archived)."""
+        """Take `key` out of its column (its session was archived)."""
         self._prune()
         for slot in [sl for sl in self.slots if sl.get("key") == key]:
-            if slot.get("surface"):
-                _cmux("close-surface", "--surface", slot["surface"], "--workspace", self.workspace, "--force")
+            self._evict(slot)
             self.slots.remove(slot)
         self._save()
 
@@ -733,14 +803,11 @@ class SideViewer:
         if not self.slots:
             return "No session columns open"
         for slot in self.slots:
-            for p in self._panes():
-                if slot["pane"] in (p.get("ref"), p.get("id")):
-                    for ref in p.get("surface_refs") or []:
-                        _cmux("close-surface", "--surface", ref, "--workspace", self.workspace, "--force")
+            self._evict(slot)
         n = len(self.slots)
         self.slots = []
         self._save()
-        return f"Closed {n} session column{'s' if n > 1 else ''} (the sessions keep running)"
+        return f"Closed {n} session column{'s' if n > 1 else ''} (the sessions keep running; moved tabs went home)"
 
 
 # ── app ────────────────────────────────────────────────────────────────────
@@ -1241,13 +1308,13 @@ class Board(App[None]):
         self.run_close_side()
 
     def opens_on_side(self, r: Row) -> bool:
-        return self.side.available and r.kind == "bg" and bool(r.id)
+        return self.side.available and (r.kind == "bg" and bool(r.id) or r.kind == "tab" and bool(r.pid))
 
     @work(thread=True, exclusive=True, group="jump")
     def run_jump(self, r: Row, focus: bool) -> None:
         # Background sessions open in the split on the right; an interactive tab
         # can't be attached elsewhere, so that one still switches to its own tab.
-        msg = self.side.show(r, focus) if self.opens_on_side(r) else jump(r)
+        msg = (self.side.open_row(r, focus) if self.opens_on_side(r) else None) or jump(r)
         self.call_from_thread(self.notify, msg, timeout=3)
         self.call_from_thread(self.tick)
 
