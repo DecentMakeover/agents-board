@@ -271,6 +271,10 @@ def load_rows() -> list[Row]:
     start = out.stdout.find("[")
     agents = json.loads(out.stdout[start:]) if start >= 0 else []
     now = time.time() * 1000
+    # `claude attach <id>` (a session column) shows up as an interactive session with the same
+    # session id as the background one it views: it is that session, not another one.
+    background = {a.get("sessionId") for a in agents if a.get("kind") == "background"}
+    agents = [a for a in agents if not (a.get("kind") == "interactive" and a.get("sessionId") in background)]
     rows = []
     for a in agents:
         job = _read_json(CLAUDE / "jobs" / a["id"] / "state.json") if a.get("id") else {}
@@ -610,26 +614,28 @@ class SideViewer:
         return ""
 
     def _prune(self) -> None:
-        """Forget slots whose pane the person closed; refind a pane from its surface."""
+        """Keep only columns whose session tab is still on screen, each in its own pane.
+
+        A column follows its tab if it was dragged to another pane; a column whose tab is
+        gone (closed, or moved out of this workspace) is forgotten rather than pointed at
+        whatever else is in that pane, and two columns never share one pane.
+        """
         panes = self._panes()
-        by_ref = {_s(p.get("ref")): p for p in panes} | {_s(p.get("id")): p for p in panes}
-        kept = []
-        for slot in self.slots:
-            pane = by_ref.get(slot.get("pane", ""))
-            if pane is None and slot.get("surface"):
-                ref = next((_s(p.get("ref")) for p in panes
-                            if slot["surface"] in (p.get("surface_refs") or []) + (p.get("surface_ids") or [])), "")
-                pane = by_ref.get(ref)
-                slot["pane"] = ref
-            if pane is None:
+        where: dict[str, str] = {}                 # surface ref or id -> pane ref
+        for p in panes:
+            for ref in (p.get("surface_refs") or []) + (p.get("surface_ids") or []):
+                where[ref] = _s(p.get("ref"))
+        kept: list[dict[str, Any]] = []
+        taken: set[str] = set()
+        for slot in sorted(self.slots, key=lambda sl: -sl.get("used", 0)):   # newest wins a pane
+            pane = where.get(slot.get("surface", ""))
+            if not pane or pane in taken or pane == where.get(self.board_surface):
                 continue
-            refs = set(pane.get("surface_refs") or []) | set(pane.get("surface_ids") or [])
-            if slot.get("surface") not in refs:
-                slot["surface"] = next(iter(pane.get("surface_refs") or []), "")
+            slot["pane"] = pane
+            taken.add(pane)
             kept.append(slot)
-        # Left to right, as on screen.
         x = {_s(p.get("ref")): (p.get("pixel_frame") or {}).get("x", 0) for p in panes}
-        self.slots = sorted(kept, key=lambda sl: x.get(sl["pane"], 0))
+        self.slots = sorted(kept, key=lambda sl: x.get(sl["pane"], 0))   # left to right, as on screen
 
     def _layout(self) -> None:
         """Board about a third, the slots sharing the rest evenly (cmux halves on each split)."""
