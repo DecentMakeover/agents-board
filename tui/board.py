@@ -42,7 +42,7 @@ from textual.widgets.option_list import Option
 HOME = Path.home()
 CLAUDE = HOME / ".claude"
 CMUX = "/Applications/cmux.app/Contents/Resources/bin/cmux"
-STATE = CLAUDE / "agents-board"
+STATE = Path(os.environ.get("AGENTS_BOARD_STATE") or CLAUDE / "agents-board")  # a separate folder for test boards
 STUCK_MS = 15 * 60_000
 PARK_MS = 2 * 86_400_000
 DONE_SHOWN = 8
@@ -543,7 +543,7 @@ def _save_prefs(prefs: dict[str, Any]) -> None:
         pass
 
 
-SLOTS = 2              # session columns to the right of the board
+SLOTS = 2              # session panes beside the board by default; 4 makes a 2x2 grid
 BOARD_SHARE = 0.32     # of the workspace width, once the slots are open
 
 
@@ -563,6 +563,7 @@ class SideViewer:
         self.board_surface = os.environ.get("CMUX_SURFACE_ID", "")
         # Each slot: {"pane", "surface", "key", "used"}; left to right.
         self.slots: list[dict[str, Any]] = []
+        self.max_slots = 4 if _prefs().get("grid") else SLOTS
         self._restore()
 
     # The board restarts itself on update: keep the slots it opened.
@@ -634,28 +635,53 @@ class SideViewer:
             slot["pane"] = pane
             taken.add(pane)
             kept.append(slot)
-        x = {_s(p.get("ref")): (p.get("pixel_frame") or {}).get("x", 0) for p in panes}
-        self.slots = sorted(kept, key=lambda sl: x.get(sl["pane"], 0))   # left to right, as on screen
+        xy = {_s(p.get("ref")): ((p.get("pixel_frame") or {}).get("x", 0), (p.get("pixel_frame") or {}).get("y", 0))
+              for p in panes}
+        self.slots = sorted(kept, key=lambda sl: xy.get(sl["pane"], (0, 0)))   # by column, then top to bottom
+
+    def _columns(self) -> list[list[dict[str, Any]]]:
+        """The workspace's panes grouped into columns (left to right), each top to bottom."""
+        cols: dict[int, list[dict[str, Any]]] = {}
+        for p in self._panes():
+            f = p.get("pixel_frame") or {}
+            cols.setdefault(round(f.get("x", 0) / 8), []).append(p)
+        return [sorted(cols[k], key=lambda p: (p.get("pixel_frame") or {}).get("y", 0)) for k in sorted(cols)]
 
     def _layout(self) -> None:
-        """Board about a third, the slots sharing the rest evenly (cmux halves on each split)."""
-        panes = sorted(self._panes(), key=lambda p: (p.get("pixel_frame") or {}).get("x", 0))
-        if len(panes) < 2:
+        """Board about a third, the session columns sharing the rest evenly (cmux halves on
+        each split). Stacked panes in a column share its width, so only columns are sized."""
+        cols = self._columns()
+        if len(cols) < 2:
             return
-        total = sum((p.get("pixel_frame") or {}).get("width", 0) for p in panes)
-        board_w = round(total * BOARD_SHARE) if len(panes) > 2 else round(total * 0.42)
-        slot_w = (total - board_w) // (len(panes) - 1)
-        # Move each slot's left border so the pane before it has its target width.
-        for i in range(1, len(panes)):
-            panes = sorted(self._panes(), key=lambda p: (p.get("pixel_frame") or {}).get("x", 0))
-            if i >= len(panes):
+        total = sum((c[0].get("pixel_frame") or {}).get("width", 0) for c in cols)
+        board_w = round(total * BOARD_SHARE) if len(cols) > 2 else round(total * 0.42)
+        slot_w = (total - board_w) // (len(cols) - 1)
+        # Move each column's left border so the column before it has its target width.
+        for i in range(1, len(cols)):
+            cols = self._columns()
+            if i >= len(cols):
                 return
             want = board_w if i == 1 else slot_w
-            have = (panes[i - 1].get("pixel_frame") or {}).get("width", 0)
+            have = (cols[i - 1][0].get("pixel_frame") or {}).get("width", 0)
             delta = have - want
             if abs(delta) > 8:
-                _cmux("resize-pane", "--workspace", self.workspace, "--pane", _s(panes[i].get("ref")),
+                _cmux("resize-pane", "--workspace", self.workspace, "--pane", _s(cols[i][0].get("ref")),
                       "-L" if delta > 0 else "-R", "--amount", str(abs(delta)))
+
+    def _next_split(self) -> tuple[str, str]:
+        """Where a new session pane goes: the first two split off to the right; in the 2x2
+        grid the third and fourth stack under whichever column has fewer."""
+        frames = {_s(p.get("ref")): p.get("pixel_frame") or {} for p in self._panes()}
+        by_col: dict[int, list[dict[str, Any]]] = {}
+        for sl in self.slots:
+            f = frames.get(sl.get("pane", ""), {})
+            by_col.setdefault(round(f.get("x", 0) / 8), []).append(sl)
+        if len(by_col) < 2:
+            right = max(self.slots, key=lambda sl: frames.get(sl.get("pane", ""), {}).get("x", 0)) if self.slots else None
+            return "right", right["surface"] if right else self.board_surface
+        col = min(by_col, key=lambda k: (len(by_col[k]), k))
+        top = min(by_col[col], key=lambda sl: frames.get(sl.get("pane", ""), {}).get("y", 0))
+        return "down", top["surface"]
 
     def show(self, row: Row, focus: bool) -> str:
         return self.show_command(f"claude attach {row.id}", row.key, row.name, focus)
@@ -671,10 +697,10 @@ class SideViewer:
             self._save()
             return f"{label} is already open"
         flag = "true" if focus else "false"
-        if len(self.slots) < SLOTS:
-            # Room for another column: split off the rightmost pane.
-            parent = self.slots[-1]["surface"] if self.slots else self.board_surface
-            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", parent,
+        if len(self.slots) < self.max_slots:
+            # Room for another pane: split it off (right, or down in the grid).
+            direction, parent = self._next_split()
+            made = _cmux("new-split", direction, "--workspace", self.workspace, "--surface", parent,
                          "--command", command, "--focus", flag)
             if made.returncode != 0:
                 return f"cmux: {made.stderr.strip()[:120]}"
@@ -686,7 +712,7 @@ class SideViewer:
             # Both columns busy: the least recently used one that isn't held gets this session.
             free = [sl for sl in self.slots if not sl.get("held")]
             if not free:
-                return "Both columns are held: press l on one of them to release it"
+                return "Every session pane is held: press l on one of them to release it"
             slot = min(free, key=lambda sl: sl.get("used", 0))
             made = _cmux("new-surface", "--pane", slot["pane"], "--workspace", self.workspace,
                          "--command", command, "--focus", flag)
@@ -736,9 +762,9 @@ class SideViewer:
         if home == self.workspace:
             home = ""  # it already lives in the board's workspace: send it to a tab of its own later
         flag = "true" if focus else "false"
-        if len(self.slots) < SLOTS:
-            parent = self.slots[-1]["surface"] if self.slots else self.board_surface
-            made = _cmux("new-split", "right", "--workspace", self.workspace, "--surface", parent, "--focus", "false")
+        if len(self.slots) < self.max_slots:
+            direction, parent = self._next_split()
+            made = _cmux("new-split", direction, "--workspace", self.workspace, "--surface", parent, "--focus", "false")
             if made.returncode != 0:
                 return f"cmux: {made.stderr.strip()[:120]}"
             placeholder = made.stdout.split()[1] if len(made.stdout.split()) > 1 else ""
@@ -754,7 +780,7 @@ class SideViewer:
         else:
             free = [sl for sl in self.slots if not sl.get("held")]
             if not free:
-                return "Both columns are held: press l on one of them to release it"
+                return "Every session pane is held: press l on one of them to release it"
             slot = min(free, key=lambda sl: sl.get("used", 0))
             moved = _cmux("move-surface", "--surface", tab, "--pane", slot["pane"], "--workspace", self.workspace, "--focus", flag)
             if moved.returncode != 0:
@@ -771,6 +797,19 @@ class SideViewer:
     def open_row(self, row: Row, focus: bool) -> str | None:
         """Open any session in a column: attach a background one, move an interactive tab."""
         return self.show(row, focus) if row.kind == "bg" and row.id else self.show_tab(row, focus)
+
+    def set_grid(self, grid: bool) -> str:
+        """2 session panes or a 2x2 grid of 4. Going back to 2 sends the extra ones away
+        (least recently used first, held ones kept as long as possible)."""
+        self.max_slots = 4 if grid else SLOTS
+        self._prune()
+        while len(self.slots) > self.max_slots:
+            victim = min(self.slots, key=lambda sl: (bool(sl.get("held")), sl.get("used", 0)))
+            self._evict(victim)
+            self.slots.remove(victim)
+        self._save()
+        self._layout()
+        return "Four session panes (2x2) beside the board" if grid else "Two session columns beside the board"
 
     def slot_of(self, key: str) -> dict[str, Any] | None:
         return next((sl for sl in self.slots if sl.get("key") == key), None)
@@ -851,6 +890,9 @@ class Board(App[None]):
         Binding("f", "pin", "pin/unpin"),
         Binding("z", "undo_archive", "undo archive", show=False),
         Binding("l", "hold", "hold column", show=False),
+        Binding("w", "focus_toggle", "focus"),
+        Binding("o", "open_focus", "open focus"),
+        Binding("4", "toggle_grid", "2x2 grid", show=False),
         Binding("slash", "filter", "filter"),
         Binding("question_mark", "keys", "keys"),
         Binding("space", "peek", "peek", show=False),
@@ -889,6 +931,7 @@ class Board(App[None]):
         self.rejected_mtime = 0.0
         self.by_folder = bool(_prefs().get("by_folder"))
         self._pins: set[str] = set()
+        self._focus: set[str] = set()
         self.cursor_key = ""
         self.show_info = bool(_prefs().get("show_info"))
 
@@ -1018,7 +1061,7 @@ class Board(App[None]):
     # drawing
     def row_prompt(self, r: Row, now: float) -> Table:
         # Pinned rows sit outside their folder, so they name it.
-        return self._row_prompt(r, now, show_folder=not self.by_folder or self.is_pinned(r))
+        return self._row_prompt(r, now, show_folder=not self.by_folder or self.is_pinned(r) or self.is_focus(r))
 
     # pins: sessions kept in their own section at the top, by session id (stable across resumes)
     def pins(self) -> set[str]:
@@ -1026,6 +1069,13 @@ class Board(App[None]):
 
     def is_pinned(self, r: Row) -> bool:
         return (r.session_id or r.key) in self._pins
+
+    # focus: the few sessions being worked on right now, in a section above Pinned
+    def is_focus(self, r: Row) -> bool:
+        return (r.session_id or r.key) in self._focus
+
+    def focus_header_prompt(self, count: int) -> RGroup:
+        return self._band(Text("◉ Focus", style=f"bold {TEAL}"), Text(f"{count}", style=SOFT))
 
     def pinned_header_prompt(self, count: int) -> Table:
         label = Text("★ Pinned", style=f"bold {ACCENT}")
@@ -1125,10 +1175,18 @@ class Board(App[None]):
         options: list[Option] = []
         self.shown = []
         self._pins = self.pins()
+        self._focus = set(_marks("focus"))
+        focus = [r for r in rows if self.is_focus(r)]
+        rows = [r for r in rows if not self.is_focus(r)]
+        if focus:
+            options.append(Option(Padding(self.focus_header_prompt(len(focus)), (1, 0, 0, 0)), id="hdr:focus", disabled=True))
+            for r in focus:
+                options.append(Option(self.row_prompt(r, now), id=f"row:{r.key}"))
+                self.shown.append(r)
         pinned = [r for r in rows if self.is_pinned(r)]
         rows = [r for r in rows if not self.is_pinned(r)]
         if pinned:
-            options.append(Option(Padding(self.pinned_header_prompt(len(pinned)), (1, 0, 0, 0)), id="hdr:pinned", disabled=True))
+            options.append(Option(Padding(self.pinned_header_prompt(len(pinned)), (self._gap(options), 0, 0, 0)), id="hdr:pinned", disabled=True))
             for r in pinned:
                 options.append(Option(self.row_prompt(r, now), id=f"row:{r.key}"))
                 self.shown.append(r)
@@ -1374,6 +1432,63 @@ class Board(App[None]):
         self.call_from_thread(settle)
         self.call_from_thread(self.load)
 
+    def action_focus_toggle(self) -> None:
+        r = self.current()
+        if r is None:
+            return
+        focus = _marks("focus")
+        sid = r.session_id or r.key
+        if sid in focus:
+            focus.pop(sid)
+            msg = f"{r.name} left Focus" + ("  ·  back in Pinned" if self.is_pinned(r) else "")
+        else:
+            focus[sid] = time.time()
+            msg = f"{r.name} is in Focus  ·  o opens all of them beside the board"
+        _save_marks("focus", focus)
+        self.notify(msg, timeout=3)
+        self.render_list()
+
+    def action_open_focus(self) -> None:
+        rows = [r for r in self.rows if self.is_focus(r)]
+        if not rows:
+            self.notify("Nothing in Focus yet: w on a session puts it there", timeout=3)
+            return
+        if not self.side.available:
+            self.notify("Opening sessions beside the board needs the board running in cmux", timeout=3)
+            return
+        self.run_open_focus(rows)
+
+    @work(thread=True, exclusive=True, group="jump")
+    def run_open_focus(self, rows: list[Row]) -> None:
+        room = self.side.max_slots
+        opened = []
+        for r in rows[:room]:
+            msg = self.side.open_row(r, focus=False)
+            if msg is not None and "held" not in msg:
+                opened.append(r.name)
+        extra = len(rows) - room
+        note = f"Opened {len(opened)} focus session{'s' if len(opened) != 1 else ''}"
+        if extra > 0:
+            note += f"  ·  {extra} more than fit" + ("" if room == 4 else ": 4 switches to a 2x2 grid")
+        self.call_from_thread(self.notify, note, timeout=5)
+        self.call_from_thread(self.tick)
+
+    def action_toggle_grid(self) -> None:
+        if not self.side.available:
+            self.notify("The session grid needs the board running in cmux", timeout=3)
+            return
+        grid = self.side.max_slots != 4
+        prefs = _prefs()
+        prefs["grid"] = grid
+        _save_prefs(prefs)
+        self.run_grid(grid)
+
+    @work(thread=True, exclusive=True, group="jump")
+    def run_grid(self, grid: bool) -> None:
+        msg = self.side.set_grid(grid)
+        self.call_from_thread(self.notify, msg, timeout=3)
+        self.call_from_thread(self.tick)
+
     def action_hold(self) -> None:
         r = self.current()
         if r is None:
@@ -1479,7 +1594,8 @@ class Board(App[None]):
 
     def action_keys(self) -> None:
         self.notify(
-            "⏎ open beside the board   space peek   l hold / release a column   x close sessions\n"
+            "⏎ open beside the board   space peek   l hold / release a pane   x close sessions\n"
+            "w focus / unfocus   o open every focus session   4 two columns / 2x2 grid\n"
             "c new session here (opens beside the board)   a archive · z undo   f pin · unpin\n"
             "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"
@@ -1550,6 +1666,9 @@ async def _selftest() -> None:
         assert app.rows, "no rows loaded"
         first = app.rows[0]
         app.pins = lambda: {first.session_id or first.key}  # type: ignore[method-assign]
+        second = app.rows[1] if len(app.rows) > 1 else first
+        orig_marks = _marks
+        globals()["_marks"] = lambda name: {(second.session_id or second.key): 1} if name == "focus" else orig_marks(name)
         for by_folder in (False, True):
             app.by_folder = by_folder
             app.render_list()

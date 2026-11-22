@@ -40,6 +40,9 @@ Keys on the full-screen board:
 | `/` | filter by name, folder or question; `esc` clears |
 | `a` / `z` | archive the selected session / undo the last archive (see below) |
 | `f` | pin / unpin: keep a session in the Pinned section at the top |
+| `w` | focus / unfocus: the few sessions you're working on now, in a Focus section above Pinned |
+| `o` | open every Focus session beside the board at once |
+| `4` | two session columns, or a 2x2 grid of four (remembered) |
 | `h` / `u` | hide a session until its state changes / unhide all |
 | `p` | show parked sessions |
 | `d` | show every finished session, not just the latest 8 |
@@ -71,6 +74,12 @@ idle background session (`claude --bg`) that opens beside the board with the cur
 type its first prompt there. It shows on the board like any other session, and closing or replacing
 its column never ends it. A folder Claude Code doesn't trust yet answers with its trust message: run
 `claude` there once.
+
+**Focus.** `w` puts a session in a ◉ Focus section above Pinned, for the two to four sessions you
+are actually working on; `w` again sends it back (to Pinned, if it was pinned). `o` opens them all
+beside the board in one go. `4` switches the right side to a 2x2 grid, so four focus sessions sit on
+screen together; `4` again goes back to two columns (the least recently used panes are sent away,
+held ones last).
 
 **Pinned.** `f` pins the selected session: it moves into a ★ Pinned section at the top of the
 board, in folder and status view alike, with its folder named on the row, and keeps its live state
@@ -141,6 +150,7 @@ claude plugin validate .      # what the engine will load
 claude plugin test .          # tests/*.test.tsx against the engine
 uv run --script tui/board.py --demo
 uv run --script tui/board.py --selftest   # draws both views headlessly; exit 0 = good
+AGENTS_BOARD_STATE=/tmp/x uv run --script tui/board.py   # a test board with its own pins/focus/prefs
 ```
 
 A running board restarts itself into a newer `board.py` only after that file passes `--selftest`, so a
