@@ -529,6 +529,7 @@ def restore_session(session_id: str) -> tuple[bool, str]:
 
 
 UNDO_SECONDS = 8
+FOCUS_MAX = 4          # Focus sessions all fit on screen at once: the 2x2 grid
 
 
 def _prefs() -> dict[str, Any]:
@@ -564,6 +565,7 @@ class SideViewer:
         # Each slot: {"pane", "surface", "key", "used"}; left to right.
         self.slots: list[dict[str, Any]] = []
         self.max_slots = 4 if _prefs().get("grid") else SLOTS
+        self.protected: set[str] = set()   # Focus sessions: other sessions never take their pane
         self._restore()
 
     # The board restarts itself on update: keep the slots it opened.
@@ -710,10 +712,9 @@ class SideViewer:
             self._layout()
         else:
             # Both columns busy: the least recently used one that isn't held gets this session.
-            free = [sl for sl in self.slots if not sl.get("held")]
-            if not free:
+            slot = self._victim()
+            if slot is None:
                 return "Every session pane is held: press l on one of them to release it"
-            slot = min(free, key=lambda sl: sl.get("used", 0))
             made = _cmux("new-surface", "--pane", slot["pane"], "--workspace", self.workspace,
                          "--command", command, "--focus", flag)
             if made.returncode != 0:
@@ -778,10 +779,9 @@ class SideViewer:
             self.slots.append(slot)
             self._layout()
         else:
-            free = [sl for sl in self.slots if not sl.get("held")]
-            if not free:
+            slot = self._victim()
+            if slot is None:
                 return "Every session pane is held: press l on one of them to release it"
-            slot = min(free, key=lambda sl: sl.get("used", 0))
             moved = _cmux("move-surface", "--surface", tab, "--pane", slot["pane"], "--workspace", self.workspace, "--focus", flag)
             if moved.returncode != 0:
                 return f"cmux could not move {row.name}: {moved.stderr.strip()[:100]}"
@@ -797,6 +797,15 @@ class SideViewer:
     def open_row(self, row: Row, focus: bool) -> str | None:
         """Open any session in a column: attach a background one, move an interactive tab."""
         return self.show(row, focus) if row.kind == "bg" and row.id else self.show_tab(row, focus)
+
+    def _victim(self) -> dict[str, Any] | None:
+        """The pane a new session takes when all are in use: never a held one, and a Focus
+        session's only when every free pane shows one; least recently used first."""
+        free = [sl for sl in self.slots if not sl.get("held")]
+        if not free:
+            return None
+        pool = [sl for sl in free if sl.get("key") not in self.protected] or free
+        return min(pool, key=lambda sl: sl.get("used", 0))
 
     def set_grid(self, grid: bool) -> str:
         """2 session panes or a 2x2 grid of 4. Going back to 2 sends the extra ones away
@@ -1177,6 +1186,7 @@ class Board(App[None]):
         self._pins = self.pins()
         self._focus = set(_marks("focus"))
         focus = [r for r in rows if self.is_focus(r)]
+        self.sync_side([r for r in self.rows if self.is_focus(r)])   # all of Focus, not just what a filter shows
         rows = [r for r in rows if not self.is_focus(r)]
         if focus:
             options.append(Option(Padding(self.focus_header_prompt(len(focus)), (1, 0, 0, 0)), id="hdr:focus", disabled=True))
@@ -1432,6 +1442,13 @@ class Board(App[None]):
         self.call_from_thread(settle)
         self.call_from_thread(self.load)
 
+    def sync_side(self, focus: list[Row]) -> None:
+        """Focus sessions all fit on screen: with three or more the session panes become the
+        2x2 grid (no pane is taken away when it drops back), and nothing else takes their pane."""
+        want = 4 if (_prefs().get("grid") or len(focus) >= 3) else SLOTS
+        self.side.max_slots = want
+        self.side.protected = {r.key for r in focus}
+
     def action_focus_toggle(self) -> None:
         r = self.current()
         if r is None:
@@ -1442,6 +1459,9 @@ class Board(App[None]):
             focus.pop(sid)
             msg = f"{r.name} left Focus" + ("  ·  back in Pinned" if self.is_pinned(r) else "")
         else:
+            if len(focus) >= FOCUS_MAX:
+                self.notify(f"Focus is full ({FOCUS_MAX}): w on one of them to take it out first", severity="warning", timeout=4)
+                return
             focus[sid] = time.time()
             msg = f"{r.name} is in Focus  ·  o opens all of them beside the board"
         _save_marks("focus", focus)

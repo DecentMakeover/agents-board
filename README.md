@@ -40,7 +40,7 @@ Keys on the full-screen board:
 | `/` | filter by name, folder or question; `esc` clears |
 | `a` / `z` | archive the selected session / undo the last archive (see below) |
 | `f` | pin / unpin: keep a session in the Pinned section at the top |
-| `w` | focus / unfocus: the few sessions you're working on now, in a Focus section above Pinned |
+| `w` | focus / unfocus (up to 4): the sessions you're working on now, kept on screen together |
 | `o` | open every Focus session beside the board at once |
 | `4` | two session columns, or a 2x2 grid of four (remembered) |
 | `h` / `u` | hide a session until its state changes / unhide all |
@@ -75,11 +75,12 @@ type its first prompt there. It shows on the board like any other session, and c
 its column never ends it. A folder Claude Code doesn't trust yet answers with its trust message: run
 `claude` there once.
 
-**Focus.** `w` puts a session in a ◉ Focus section above Pinned, for the two to four sessions you
-are actually working on; `w` again sends it back (to Pinned, if it was pinned). `o` opens them all
-beside the board in one go. `4` switches the right side to a 2x2 grid, so four focus sessions sit on
-screen together; `4` again goes back to two columns (the least recently used panes are sent away,
-held ones last).
+**Focus.** `w` puts a session in a ◉ Focus section above Pinned, for the sessions you are actually
+working on, up to four so they all fit on screen at once; `w` again sends it back (to Pinned, if it
+was pinned). With three or more in Focus the session panes become a 2x2 grid by themselves, and a
+Focus session's pane is never taken by another session. `o` opens them all beside the board in one
+go. `4` switches the grid on or off by hand; going back to two columns sends the least recently used
+panes away (held ones last).
 
 **Pinned.** `f` pins the selected session: it moves into a ★ Pinned section at the top of the
 board, in folder and status view alike, with its folder named on the row, and keeps its live state

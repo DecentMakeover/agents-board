@@ -1,6 +1,6 @@
 {
   "name": "agents-board",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "One screen for every Claude Code session on your machine: sorted by what needs you, what looks stuck and what is working, with live timers, a full-screen board and a one-key jump in cmux",
   "license": "MIT",
   "homepage": "https://github.com/DecentMakeover/agents-board",
