@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -182,7 +183,7 @@ def classify(a: dict[str, Any], job: dict[str, Any], pidf: dict[str, Any], trans
     else:
         group = "idle"
         since = status_at or activity
-        note = "sitting at its prompt"
+        note = "interactive: ends when its tab closes  ·  k keeps it on the board"
 
     return Row(
         key=_s(a.get("id")) or _s(a.get("sessionId")) or str(pid),
@@ -497,6 +498,54 @@ def archive_session(row: Row) -> tuple[bool, str]:
     }
     (dest / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     return True, f"Archived {row.name}  ·  /unarchive {row.id} brings it back"
+
+
+def keep_session(row: Row) -> tuple[bool, str, str]:
+    """Turn an interactive session into a background one, so closing its tab can't end it:
+    stop the interactive process, `claude --bg --resume` the same conversation (same session
+    id, name, pins and focus), and have its own tab attach to it. Refused mid-task.
+    Answers (ok, message, new job id)."""
+    if row.kind != "tab":
+        return False, f"{row.name} is already a background session on the board", ""
+    if row.status in ("busy", "shell"):
+        return False, f"{row.name} is in the middle of something: k again once it's waiting for you", ""
+    sessions = _read_json(HOME / ".cmuxterm" / "claude-hook-sessions.json").get("sessions") or {}
+    own = sessions.get(row.session_id) or {}
+    surface = _s(own.get("surfaceId")) if own.get("pid") == row.pid else ""
+    workspace = _s(own.get("workspaceId")) if surface else ""
+
+    def alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+
+    if row.pid and alive(row.pid):
+        try:
+            os.kill(row.pid, signal.SIGTERM)   # Claude Code saves and exits on TERM
+        except OSError:
+            pass
+        for _ in range(50):
+            if not alive(row.pid):
+                break
+            time.sleep(0.2)
+        if alive(row.pid):
+            return False, f"{row.name} didn't stop, so it was left as it is", ""
+    named = ["--name", row.name] if row.name else []
+    out = subprocess.run(["claude", "--bg", "--resume", row.session_id, *named], cwd=row.cwd or str(HOME),
+                         capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    m = re.search(r"claude attach ([0-9a-f]{6,})", out.stdout)
+    if out.returncode != 0 or not m:
+        why = (out.stderr or out.stdout).strip().splitlines()
+        return False, f"{row.name} stopped but didn't resume: {(why[-1] if why else '?')[:100]} · run claude --resume {row.session_id}", ""
+    job = m.group(1)
+    if surface and Path(CMUX).exists():
+        # The same tab carries on, now as a view of the background session.
+        time.sleep(0.5)
+        _cmux("send", "--surface", surface, "--workspace", workspace, f"claude attach {job}")
+        _cmux("send-key", "--surface", surface, "--workspace", workspace, "enter")
+    return True, f"Kept {row.name}: it's a background session now, so closing its tab won't end it", job
 
 
 def restore_session(session_id: str) -> tuple[bool, str]:
@@ -899,6 +948,7 @@ class Board(App[None]):
         Binding("f", "pin", "pin/unpin"),
         Binding("z", "undo_archive", "undo archive", show=False),
         Binding("l", "hold", "hold column", show=False),
+        Binding("k", "keep", "keep interactive", show=False),
         Binding("w", "focus_toggle", "focus"),
         Binding("o", "open_focus", "open focus"),
         Binding("4", "toggle_grid", "2x2 grid", show=False),
@@ -1112,7 +1162,7 @@ class Board(App[None]):
         if show_folder:
             name.append(f"   {short_folder(r.cwd)}", style=FAINT)
         if r.kind == "tab":
-            name.append("   tab", style=ACCENT)
+            name.append("   interactive", style=ACCENT)
         slot = self.side.slot_of(r.key) if self.side.available else None
         if slot is not None:
             name.append("   ◨ held" if slot.get("held") else "   ◨ open", style=f"bold {ACCENT}" if slot.get("held") else FAINT)
@@ -1509,6 +1559,33 @@ class Board(App[None]):
         self.call_from_thread(self.notify, msg, timeout=3)
         self.call_from_thread(self.tick)
 
+    def action_keep(self) -> None:
+        r = self.current()
+        if r is None:
+            return
+        if DEMO:
+            self.notify(f"demo mode · this would keep {r.name} on the board", timeout=3)
+            return
+        if r.kind != "tab":
+            self.notify(f"{r.name} is already a background session on the board", timeout=3)
+            return
+        self.notify(f"Keeping {r.name}…", timeout=2)
+        self.run_keep(r)
+
+    @work(thread=True, group="keep")
+    def run_keep(self, r: Row) -> None:
+        ok, msg, job = keep_session(r)
+        if ok:
+            # A column showing the interactive tab now shows the background session.
+            slot = self.side.slot_of(r.key)
+            if slot is not None:
+                slot.update(key=job)
+                slot.pop("kind", None)
+                slot.pop("home", None)
+                self.side._save()
+        self.call_from_thread(self.notify, msg, severity="information" if ok else "warning", timeout=6)
+        self.call_from_thread(self.load)
+
     def action_hold(self) -> None:
         r = self.current()
         if r is None:
@@ -1616,6 +1693,7 @@ class Board(App[None]):
         self.notify(
             "⏎ open beside the board   space peek   l hold / release a pane   x close sessions\n"
             "w focus / unfocus   o open every focus session   4 two columns / 2x2 grid\n"
+            "k keep an interactive session (so closing its tab can't end it)\n"
             "c new session here (opens beside the board)   a archive · z undo   f pin · unpin\n"
             "h hide · u unhide\n"
             "g by folder / by status   i info panel   / filter\n"

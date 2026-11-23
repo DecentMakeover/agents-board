@@ -33,6 +33,7 @@ Keys on the full-screen board:
 | `⏎` / click | open that session in a column beside the board and type into it (see below) |
 | `space` | peek: open it in a column but stay on the board |
 | `l` | hold / release the column a session is in: a held column is never replaced |
+| `k` | keep an interactive session: turn it into a background session so closing its tab can't end it |
 | `x` | close the session columns (the sessions keep running) |
 | `i` | show the info panel: full question, suggested reply, original ask (remembered) |
 | `g` | group by folder instead of by status (remembered) |
@@ -64,6 +65,12 @@ Interactive sessions (the ones marked `tab`) open in a column too: their own cmu
 the column (a session can't run in two places), and when the column is replaced, released or closed
 the tab goes back to its own workspace, still running. Without cmux, the board tells you the
 `claude attach <id>` to run.
+
+**Interactive sessions.** A session started by typing `claude` in a terminal is *interactive*: it
+lives in that tab and ends when the tab closes, so it leaves the board. Those rows are tagged
+`interactive`. `k` keeps one: the interactive process is stopped, the same conversation resumes as
+a background session (same session id, name, pins and focus) and its tab attaches to it, so closing
+the tab no longer loses it. It is refused while the session is in the middle of a task.
 
 **By folder.** `g` regroups the board by folder: each folder gets a header with its counts
 (● needs you, ◆ working, ◇ idle, ✓ done), folders that need you come first, and the sessions inside
