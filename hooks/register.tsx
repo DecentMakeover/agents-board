@@ -342,12 +342,58 @@ async function openFullBoard($: Engine): Promise<{ ok: boolean; text: string }> 
     : { ok: false, text: `cmux could not open a tab (${clip(made.out, 100)}); run: ${command}` }
 }
 
+/** The cmux workspace and surface the user is looking at (where /board was typed). */
+async function focusedPlace($: Engine): Promise<{ workspace: string; surface: string } | undefined> {
+  const r = await cmux($, ['--json', '--id-format', 'uuids', 'identify'])
+  if (!r.ok) return undefined
+  try {
+    type Place = { workspace_id?: string; surface_id?: string }
+    const d = JSON.parse(r.stdout) as { focused?: Place; caller?: Place }
+    for (const p of [d.focused, d.caller]) {
+      if (p?.workspace_id && p.surface_id) return { workspace: p.workspace_id, surface: p.surface_id }
+    }
+  } catch {
+    // not JSON: no place
+  }
+  return undefined
+}
+
+/**
+ * A board of this workspace's own: every workspace can have one, opening its session
+ * columns beside it there. Focus it when it already runs here, else split it off to the
+ * left of the pane /board was typed in. Outside a cmux workspace, the shared board tab.
+ */
+async function openWorkspaceBoard($: Engine): Promise<{ ok: boolean; text: string }> {
+  const command = await fullBoardCommand($)
+  if (command === undefined) {
+    return { ok: false, text: 'The full-screen board needs uv (https://docs.astral.sh/uv/); showing the pane instead.' }
+  }
+  if (!(await $.fs.exists(CMUX))) {
+    return { ok: false, text: `For the full-screen board, run this in a terminal: ${command}` }
+  }
+  const here = await focusedPlace($)
+  if (here === undefined) return openFullBoard($)
+  const hp = await home($)
+  const beat = await readJson<{ at?: number; surface?: string }>($, `${hp}/.claude/agents-board/running-${here.workspace}.json`)
+  if (typeof beat?.at === 'number' && (await $.clock.now()) - beat.at < 15_000) {
+    if (!beat.surface) return { ok: true, text: 'This workspace already has an agents board running.' }
+    const f = await cmux($, ['focus-panel', '--panel', beat.surface, '--workspace', here.workspace])
+    if (f.ok) return { ok: true, text: "Switched to this workspace's agents board." }
+  }
+  const made = await cmux($, [
+    'new-split', 'left', '--workspace', here.workspace, '--surface', here.surface, '--command', command, '--focus', 'true',
+  ])
+  return made.ok
+    ? { ok: true, text: 'Opened an agents board in this workspace.' }
+    : { ok: false, text: `cmux could not split this workspace (${clip(made.out, 100)}); run: ${command}` }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'board',
       description:
-        'Agents board: every Claude session on this machine, needs-you / stuck / working with timers, full screen in its own cmux tab. "/board pane" shows it beside the chat',
+        'Agents board: every Claude session on this machine, needs-you / stuck / working with timers, in a pane of this cmux workspace (each workspace can have its own). "/board tab" opens the shared board tab, "/board pane" a compact one beside the chat',
     })
     selfId = await $.session.id()
     // Drawing must never shell out (a render has a tight budget): learn $HOME now.
@@ -362,8 +408,9 @@ export const register: Register = on => {
 
   on('command.run', { command: 'board' }, async ($, e) => {
     let note = ''
-    if (e.args.trim() !== 'pane') {
-      const full = await openFullBoard($)
+    const arg = e.args.trim()
+    if (arg !== 'pane') {
+      const full = arg === 'tab' ? await openFullBoard($) : await openWorkspaceBoard($)
       if (full.ok) return { text: full.text }
       note = `${full.text}\n`
     }

@@ -50,6 +50,9 @@ DONE_SHOWN = 8
 SELFTEST = "--selftest" in sys.argv[1:]
 DEMO = "--demo" in sys.argv[1:] or SELFTEST
 SELF = Path(__file__).resolve()
+# Each cmux workspace can run a board of its own: its Focus set is its own too.
+WORKSPACE = os.environ.get("CMUX_WORKSPACE_ID", "")
+FOCUS = f"focus-{WORKSPACE}" if WORKSPACE else "focus"
 SELF_MTIME = SELF.stat().st_mtime
 
 # ── palette ────────────────────────────────────────────────────────────────
@@ -384,6 +387,17 @@ def _marks(name: str) -> dict[str, float]:
 def _save_marks(name: str, marks: dict[str, float]) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     (STATE / f"{name}.json").write_text(json.dumps(marks))
+
+
+def _adopt_shared_focus() -> None:
+    """Focus used to be one set for every board: the first board to start with a Focus of
+    its own takes that set over (a rename, so only one board gets it)."""
+    if FOCUS == "focus" or DEMO or (STATE / f"{FOCUS}.json").exists():
+        return
+    try:
+        os.rename(STATE / "focus.json", STATE / f"{FOCUS}.json")
+    except OSError:
+        pass
 
 
 # ── cmux jump ──────────────────────────────────────────────────────────────
@@ -972,6 +986,7 @@ class Board(App[None]):
 
     def __init__(self) -> None:
         super().__init__()
+        _adopt_shared_focus()
         self.rows: list[Row] = []
         self.loaded_at = 0.0
         self.error = ""
@@ -1022,7 +1037,8 @@ class Board(App[None]):
         if ws and not DEMO:
             try:
                 STATE.mkdir(parents=True, exist_ok=True)
-                (STATE / f"running-{ws}.json").write_text(json.dumps({"pid": os.getpid(), "at": time.time() * 1000}))
+                (STATE / f"running-{ws}.json").write_text(json.dumps(
+                    {"pid": os.getpid(), "at": time.time() * 1000, "surface": os.environ.get("CMUX_SURFACE_ID", "")}))
             except OSError:
                 pass
         try:
@@ -1234,7 +1250,7 @@ class Board(App[None]):
         options: list[Option] = []
         self.shown = []
         self._pins = self.pins()
-        self._focus = set(_marks("focus"))
+        self._focus = set(_marks(FOCUS))
         focus = [r for r in rows if self.is_focus(r)]
         self.sync_side([r for r in self.rows if self.is_focus(r)])   # all of Focus, not just what a filter shows
         rows = [r for r in rows if not self.is_focus(r)]
@@ -1503,7 +1519,7 @@ class Board(App[None]):
         r = self.current()
         if r is None:
             return
-        focus = _marks("focus")
+        focus = _marks(FOCUS)
         sid = r.session_id or r.key
         if sid in focus:
             focus.pop(sid)
@@ -1514,7 +1530,7 @@ class Board(App[None]):
                 return
             focus[sid] = time.time()
             msg = f"{r.name} is in Focus  ·  o opens all of them beside the board"
-        _save_marks("focus", focus)
+        _save_marks(FOCUS, focus)
         self.notify(msg, timeout=3)
         self.render_list()
 
@@ -1766,7 +1782,7 @@ async def _selftest() -> None:
         app.pins = lambda: {first.session_id or first.key}  # type: ignore[method-assign]
         second = app.rows[1] if len(app.rows) > 1 else first
         orig_marks = _marks
-        globals()["_marks"] = lambda name: {(second.session_id or second.key): 1} if name == "focus" else orig_marks(name)
+        globals()["_marks"] = lambda name: {(second.session_id or second.key): 1} if name == FOCUS else orig_marks(name)
         for by_folder in (False, True):
             app.by_folder = by_folder
             app.render_list()

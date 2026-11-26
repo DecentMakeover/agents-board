@@ -19,9 +19,14 @@ Answer `y` to add the marketplace and pick the user scope. Then type `/board`.
 
 ## Use
 
-- **`/board`** opens the full-screen board. In [cmux](https://cmux.dev) it opens in its own tab
-  ("◆ agents board") or switches to it if it is already open. Without cmux, `/board` prints the
-  one-line command to run it in any terminal, and shows the compact pane meanwhile.
+- **`/board`** opens the full-screen board. In [cmux](https://cmux.dev) it opens in the workspace you
+  typed it in, split off to the left of that pane, or focuses that workspace's board if it already
+  runs there. Every workspace can have a board of its own: each opens its session columns in its
+  own workspace and keeps its own Focus set (pins, hidden rows and preferences are shared).
+  Without cmux, `/board` prints the one-line command to run it in any terminal, and shows the
+  compact pane meanwhile.
+- **`/board tab`** opens the one shared board in its own cmux tab ("◆ agents board"), or switches
+  to it if it is already open.
 - **`/board pane`** shows a compact version beside the chat; `f` there opens the full screen.
 - **Try it with made-up sessions:** `uv run --script <plugin folder>/tui/board.py --demo`.
 
@@ -83,7 +88,7 @@ its column never ends it. A folder Claude Code doesn't trust yet answers with it
 `claude` there once.
 
 **Focus.** `w` puts a session in a ◉ Focus section above Pinned, for the sessions you are actually
-working on, up to four so they all fit on screen at once; `w` again sends it back (to Pinned, if it
+working on, up to four so they all fit on screen at once (each workspace's board has its own Focus); `w` again sends it back (to Pinned, if it
 was pinned). With three or more in Focus the session panes become a 2x2 grid by themselves, and a
 Focus session's pane is never taken by another session. `o` opens them all beside the board in one
 go. `4` switches the grid on or off by hand; going back to two columns sends the least recently used

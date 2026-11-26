@@ -115,7 +115,7 @@ test('/board groups every session and Enter jumps through cmux', async ($, on) =
   on('fs.exists', () => ({ value: true }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  // Plain /board opens the full-screen board in its own cmux tab.
+  // Plain /board outside a cmux workspace it can place (identify answers nothing) opens the shared board tab.
   const full = await $.command.run({ command: 'board', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
   expect(full.text).toBe('Opened the agents board in its own cmux tab.')
   const tab = ran.find(a => a.includes('new-workspace'))
@@ -151,7 +151,7 @@ test('/board groups every session and Enter jumps through cmux', async ($, on) =
   await ui.unmount()
 })
 
-test('/board reuses a live board tab and replaces a dead one', async ($, on) => {
+test('/board tab reuses a live board tab and replaces a dead one', async ($, on) => {
   let beatAt = NOW - 2000
   const ran: string[][] = []
   on('command.register', (_, e) => ({ value: { command: e.name } }))
@@ -181,7 +181,7 @@ test('/board reuses a live board tab and replaces a dead one', async ($, on) => 
     return ok()
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const run = () => $.command.run({ command: 'board', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+  const run = () => $.command.run({ command: 'board', args: 'tab', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
 
   expect((await run()).text).toBe('Switched to the agents board tab.')
   expect(ran.some(a => a.includes('select-workspace') && a.includes('WS-BOARD'))).toBe(true)
@@ -192,5 +192,54 @@ test('/board reuses a live board tab and replaces a dead one', async ($, on) => 
   ran.length = 0
   expect((await run()).text).toBe('Opened the agents board in its own cmux tab.')
   expect(ran.some(a => a.includes('close-workspace') && a.includes('WS-BOARD'))).toBe(true)
+  expect(ran.some(a => a.includes('new-workspace'))).toBe(true)
+})
+
+test('/board opens a board in this workspace, and focuses it once it runs there', async ($, on) => {
+  let beat: object | undefined
+  const ran: string[][] = []
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.panes', () => ({ value: [] }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('session.id', () => ({ value: 'self' }))
+  on('clock.now', () => ({ value: NOW }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.read', (_, e) => {
+    if (beat && e.path.endsWith('/running-WS-TWO.json')) return { value: JSON.stringify(beat) }
+    throw new Error('ENOENT')
+  })
+  on('process.run', (_, e) => {
+    const argv = [...e.argv]
+    ran.push(argv)
+    const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (argv[0] === '/bin/sh' && argv[2]?.includes('command -v uv')) return ok('/usr/bin/uv\n')
+    if (argv[0] === '/bin/sh') return ok(HOME)
+    if (argv.includes('identify')) {
+      return ok(JSON.stringify({ focused: { workspace_id: 'WS-TWO', surface_id: 'SURF-CHAT' }, caller: { workspace_id: 'WS-OLD', surface_id: 'X' } }))
+    }
+    return ok()
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const run = (args = '') => $.command.run({ command: 'board', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 160 } })
+
+  // No board in this workspace yet: one is split off to the left of the chat, in this workspace.
+  expect((await run()).text).toBe('Opened an agents board in this workspace.')
+  const split = ran.find(a => a.includes('new-split'))
+  expect(split?.slice(1, 7)).toEqual(['new-split', 'left', '--workspace', 'WS-TWO', '--surface', 'SURF-CHAT'])
+  expect(ran.some(a => a.includes('new-workspace') || a.includes('select-workspace'))).toBe(false)
+
+  // Its board now runs: /board focuses that pane instead of opening another.
+  beat = { pid: 3, at: NOW - 2000, surface: 'SURF-BOARD' }
+  ran.length = 0
+  expect((await run()).text).toBe("Switched to this workspace's agents board.")
+  expect(ran.some(a => a.includes('focus-panel') && a.includes('SURF-BOARD') && a.includes('WS-TWO'))).toBe(true)
+  expect(ran.some(a => a.includes('new-split'))).toBe(false)
+
+  // /board tab still opens the one shared board tab.
+  ran.length = 0
+  expect((await run('tab')).text).toBe('Opened the agents board in its own cmux tab.')
   expect(ran.some(a => a.includes('new-workspace'))).toBe(true)
 })
